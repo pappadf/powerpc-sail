@@ -1,0 +1,33 @@
+# Everything the build generates lands in build/
+build/
+*.o
+
+# Sail side artifacts
+sail_smt_cache
+
+# The MPC601 User's Manual is Motorola/NXP copyrighted material.  The model
+# cites it by section, table and figure, but this repository does not
+# redistribute it — keep your own copy here for reference.  Remove this entry
+# only if you have established that you may publish it.
+MPC601UM/
+
+# Coverage and profiling
+*.gcno
+*.gcda
+*.gcov
+*.profraw
+*.profdata
+
+# Default compiler output
+a.out
+core
+core.*
+vgcore.*
+
+# Editor and OS cruft
+.DS_Store
+*~
+*.swp
+*.swo
+.vscode/
+.idea/

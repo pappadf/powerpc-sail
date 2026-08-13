@@ -1,0 +1,8 @@
+# normalise line endings
+* text=auto
+*.sail text linguist-language=Sail
+*.S text linguist-language=GAS
+*.expected text
+*.h text
+*.ld text
+Makefile text

@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SAIL_VERSION: 0.20.2
+
+jobs:
+  model:
+    name: model (${{ matrix.core }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per core directory under model/cores/.
+        core: [p601]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 libgmp-dev gcc-powerpc-linux-gnu
+
+      # Everything this step writes goes to the runner temp directory rather
+      # than the workspace, so that the no-build-artifacts job below sees a
+      # clean tree.  The same applies to the log in the Typecheck step.
+      - name: Install Sail ${{ env.SAIL_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/sail.tar.gz" \
+            "https://github.com/rems-project/sail/releases/download/${SAIL_VERSION}-binary/sail-Linux-x86_64.tar.gz"
+          sudo mkdir -p /usr/local/opt
+          sudo tar -xzf "$RUNNER_TEMP/sail.tar.gz" -C /usr/local/opt
+          sudo ln -sf /usr/local/opt/sail/bin/sail /usr/local/bin/sail
+          sail --version
+
+      - name: Typecheck
+        run: |
+          set -euo pipefail
+          # The model must typecheck with zero errors AND zero warnings.
+          make check CORE=${{ matrix.core }} 2>&1 | tee "$RUNNER_TEMP/check.log"
+          if grep -qi warning "$RUNNER_TEMP/check.log"; then
+            echo "::error::sail reported warnings (the model must stay warning-free)"
+            exit 1
+          fi
+
+      - name: Build emulator
+        run: make emulator CORE=${{ matrix.core }}
+
+      - name: Smoke test
+        run: make run CORE=${{ matrix.core }}
+
+      - name: Test programs
+        run: make test CORE=${{ matrix.core }}
+
+      - name: Disassembler
+        run: make test-disasm CORE=${{ matrix.core }}
+
+  no-build-artifacts:
+    # A full build must leave the working tree clean — everything it produces
+    # belongs in build/, which is git-ignored — and `make clean` must remove
+    # all of it.  This is what keeps a contributor's `git status` honest.
+    name: no build artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 libgmp-dev gcc-powerpc-linux-gnu
+
+      - name: Install Sail ${{ env.SAIL_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/sail.tar.gz" \
+            "https://github.com/rems-project/sail/releases/download/${SAIL_VERSION}-binary/sail-Linux-x86_64.tar.gz"
+          sudo mkdir -p /usr/local/opt
+          sudo tar -xzf "$RUNNER_TEMP/sail.tar.gz" -C /usr/local/opt
+          sudo ln -sf /usr/local/opt/sail/bin/sail /usr/local/bin/sail
+          sail --version
+
+      - name: Build, then require a clean tree
+        run: |
+          set -euo pipefail
+          make check
+          make emulator
+          make test
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "::error::the build left files that git would commit:"
+            git status --porcelain --untracked-files=all
+            exit 1
+          fi
+          echo "build leaves no committable artifacts"
+
+      - name: Require make clean to restore the tree
+        run: |
+          set -euo pipefail
+          make clean
+          if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+            echo "::error::make clean did not remove everything make built:"
+            git status --porcelain --untracked-files=all
+            exit 1
+          fi
+          echo "make clean restores a pristine tree"
