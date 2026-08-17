@@ -560,14 +560,30 @@ fi
 #     "many vectors per process" is the whole reason the harness is a server
 #     rather than a command.
 # ---------------------------------------------------------------------------
+# `date +%s%N` is a GNU extension; BSD and macOS echo a literal "N", which
+# would make the arithmetic below fail and — under `set -e` — abort the whole
+# suite over a throughput figure that is informational anyway.  Fall back to
+# whole seconds there.
+now_ns() {
+  _t=$(date +%s%N 2>/dev/null) || _t=''
+  case "$_t" in
+    ''|*[!0-9]*) echo "$(( $(date +%s) * 1000000000 ))" ;;
+    *)           echo "$_t" ;;
+  esac
+}
+
 N=${HARNESS_BENCH_N:-5000}
 gen_batch "$N" > "$TMP/bench"
-start=$(date +%s%N)
+start=$(now_ns)
 "$HARNESS" < "$TMP/bench" > "$TMP/bench.out"
-end=$(date +%s%N)
+end=$(now_ns)
 ns=$((end - start))
 [ "$ns" -gt 0 ] || ns=1
-steps=$(grep -c '^DONE$' "$TMP/bench.out")
+# `grep -c` exits 1 when the count is zero, which under `set -e` would abort
+# the run in exactly the regression this case exists to report.  Zero
+# responses must reach the FAIL branch below, not kill the script.
+steps=$(grep -c '^DONE$' "$TMP/bench.out" 2>/dev/null || true)
+[ -n "$steps" ] || steps=0
 rate=$((steps * 1000000000 / ns))
 echo "INFO $steps vectors in $((ns / 1000000)) ms = $rate vectors/sec"
 if [ "$steps" -eq "$N" ]; then
@@ -577,6 +593,72 @@ else
   echo "FAIL batch: expected $N responses, got $steps"
   fail=$((fail + 1))
 fi
+
+# ---------------------------------------------------------------------------
+# 11. RESET clears state that has no element name.
+#     XER's Xer bitfield names SO, OV, CA, CMPB and BC, but `mtspr XER` stores
+#     all 32 bits unmasked, so manual bits 3..24 and sail bit 7 are covered by
+#     no element.  Clearing only the named ranges left them alive across RESET
+#     — invisible in the S lines, and enough to make one vector's result depend
+#     on the vector before it.  Writing 0x00FF00FF and reading back after a
+#     RESET returned 0x00FF0080 before the fix.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET gpr3 0x00FF00FF
+OPCODE 0x7C6103A6
+STEP
+RESET
+SET cia 0x00100000
+OPCODE 0x7C8102A6
+STEP
+QUIT
+---
+S gpr4 0x00000000
+S gpr4 0x00000000
+EOF
+check reset-clears-unnamed-bits '^S gpr4'
+
+# ---------------------------------------------------------------------------
+# 12. A MEM range may not run off the end of physical memory.
+#     Without the check the address wrapped and the tail landed at 0 — silently
+#     writing the exception-vector page, which is both where a hardware runner
+#     installs its handlers and a region vectors are forbidden to target.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+MEM 0xFFFFFFFE AABBCCDD
+MEM 0xFFFFFFFC AABBCCDD
+QUIT
+---
+ERR byte range runs past the end of physical memory AABBCCDD
+EOF
+check mem-range-must-not-wrap '^ERR'
+
+# ---------------------------------------------------------------------------
+# 13. OPCODE lands where the fetch looks, in little-endian mode too.
+#     HID0[LM] makes the 601 munge the low address bits rather than byte-swap,
+#     which at width 4 is "xor 4" (§2.4.3.3).  Placing the opcode at the
+#     unmunged address left the fetch reading whatever was at a ^ 4: before the
+#     fix this decoded as garbage and took a program exception instead of
+#     executing add.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET hid0 0x00000008
+SET gpr3 0x00000005
+SET gpr4 0x00000007
+OPCODE 0x7CA32215
+STEP
+QUIT
+---
+S gpr5 0x0000000C
+FF 0x00100004 4
+EXC none
+EOF
+check opcode-placement-little-endian '^(S gpr5|FF|EXC)'
 
 echo "$pass/$((pass + fail)) harness tests passed"
 [ "$fail" -eq 0 ]

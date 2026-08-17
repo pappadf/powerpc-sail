@@ -203,7 +203,8 @@ $(BUILD)/harness-cov/model.c: $(SAIL_SRCS)
 	$(SAIL) -c --c-no-main --c-coverage $(BUILD)/harness-cov/model.branches \
 	        $(SAIL_SRCS) -o $(basename $@)
 
-$(HARNESS_COV): $(BUILD)/harness-cov/model.c $(HARNESS_DEPS) $(C_DIR)/harness_cov.c
+$(HARNESS_COV): $(BUILD)/harness-cov/model.c $(HARNESS_DEPS) \
+                $(C_DIR)/harness_cov.c $(C_DIR)/harness_cov.h
 	$(CC) $(C_FLAGS) -DPPC_HARNESS_COVERAGE=1 -I $(dir $<) $< \
 	      $(HARNESS_SRCS) $(C_DIR)/harness_cov.c $(C_SRCS) $(C_LIBS) -o $@
 

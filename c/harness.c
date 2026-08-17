@@ -385,6 +385,24 @@ static uint64_t elem_mask(const elem_t *e)
   return e->bits >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << e->bits) - 1;
 }
 
+/* Zero an element's ENTIRE backing word, not just the bit range it names.
+ *
+ * RESET has to do this rather than elem_set(e, 0), because several architected
+ * registers hold bits that the model stores but the canonical vocabulary has
+ * no name for.  XER is the clearest case: the Xer bitfield names SO, OV, CA,
+ * CMPB (sail 15..8) and BC (6..0), while `mtspr XER` stores all 32 bits
+ * unmasked -- so manual bits 3..24 and sail bit 7 have no element covering
+ * them.  Clearing only the named ranges left those bits alive across RESET,
+ * invisible in the S lines, which made a batch order-dependent and broke the
+ * one guarantee RESET exists to provide.  Reproduced before this fix as:
+ * mtspr XER with 0x00FF00FF, RESET, mfspr -> 0x00FF0080 instead of 0. */
+static void elem_zero_storage(const elem_t *e)
+{
+  if (e->flag) { *e->flag = false; return; }
+  uint64_t *p = slot_of(e);
+  if (p) *p = 0;
+}
+
 static uint64_t elem_get(const elem_t *e)
 {
   if (e->flag) return *e->flag ? 1u : 0u;
@@ -586,12 +604,16 @@ static bool parse_hex(const char *s, uint64_t *out)
 {
   if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
   uint64_t v = 0;
-  int ndig = 0;
+  int ndig = 0;   /* digits seen at all, so that "" and "0x" are rejected   */
+  int nsig = 0;   /* significant digits: leading zeros cost nothing, which
+                     is what makes the 16-digit cap a check for overflow
+                     rather than a limit on how widely a caller may pad     */
   for (; *s; s++) {
     if (*s == '_') continue;
     int d = hexval((unsigned char)*s);
     if (d < 0) return false;
-    if (++ndig > 16) return false;
+    ndig++;
+    if ((nsig > 0 || d != 0) && ++nsig > 16) return false;
     v = (v << 4) | (uint64_t)d;
   }
   if (ndig == 0) return false;
@@ -630,8 +652,8 @@ static void apply_determinism_knobs(void)
 
 static void do_reset(void)
 {
-  for (int i = 0; i < n_elems; i++) elem_set(&elems[i], 0);
-  for (int i = 0; i < n_extra; i++) elem_set(&extra[i], 0);
+  for (int i = 0; i < n_elems; i++) elem_zero_storage(&elems[i]);
+  for (int i = 0; i < n_extra; i++) elem_zero_storage(&extra[i]);
   zcur_instr = 0;
   zhalt_req = false;
   zhalt_status = 0;
@@ -672,6 +694,17 @@ static void do_mem(uint32_t addr, const char *bytes)
   if (ndig == 0) { err("no hex bytes", bytes); return; }
   if (ndig & 1) { err("odd number of hex digits", bytes); return; }
 
+  /* The range must fit in the 32-bit physical address space.  Without this the
+   * store address wraps and the tail of the range lands at 0 -- silently
+   * writing the exception-vector page, which is precisely the region a
+   * hardware runner puts its handlers in and which vectors are forbidden to
+   * target.  Checked here, with the other validation, so the line is ignored
+   * whole rather than half-applied. */
+  if ((uint64_t)addr + (uint64_t)(ndig / 2) > 0x100000000ull) {
+    err("byte range runs past the end of physical memory", bytes);
+    return;
+  }
+
   int hi = -1;
   uint32_t a = addr;
   for (; *s; s++) {
@@ -695,6 +728,18 @@ static void do_mem(uint32_t addr, const char *bytes)
 static void do_opcode(uint32_t op)
 {
   uint32_t a = (uint32_t)zNIA;
+  /* Little-endian mode moves where the fetch looks.  The 601 does not
+   * byte-swap in LE mode; it munges the low address bits, which at width 4 is
+   * "xor 4" -- §2.4.3.3's "instructions are swapped within a double word"
+   * (see le_munge and phys_fetch in model/ppc_mem.sail).  Placing the opcode
+   * at the unmunged address would leave the fetch reading whatever was at
+   * a ^ 4, which decodes as garbage and traps: the command would silently
+   * stop doing what it says.  Mirrors le_munge(a, 4) rather than calling it,
+   * because that is a Sail function; if the model's munge ever changes, this
+   * has to change with it.
+   *
+   * HID0[LM] is sail bit 3 of the P601_Hid0 bitfield (manual bit 28). */
+  if ((zHID0.zbits >> 3) & 1) a ^= 4;
   mem_put(a + 0, (uint8_t)(op >> 24));
   mem_put(a + 1, (uint8_t)(op >> 16));
   mem_put(a + 2, (uint8_t)(op >> 8));
