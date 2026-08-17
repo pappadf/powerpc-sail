@@ -23,7 +23,8 @@ mapping clause encdec =
 
 function clause execute(B(li, aa, lk)) = {
   let offset : word = exts(li @ 0b00);
-  if lk == 0b1 then LR = CIA + 4;
+  if lk == 0b1 then { harness_wrote(hw_lr); LR = CIA + 4 };
+  harness_wrote(hw_nia);
   NIA = if aa == 0b1 then offset else CIA + offset;
   COMPLETED
 }
@@ -42,6 +43,7 @@ function branch_cond_taken(bo, bi) = {
   let ctr_ok : bool =
     if bo[2] == bitone then true
     else {
+      harness_wrote(hw_ctr);
       CTR = CTR - 1;
       /* BO[3]=1: branch if CTR=0; BO[3]=0: branch if CTR!=0 */
       if bo[1] == bitone then CTR == zeros(32) else CTR != zeros(32)
@@ -59,9 +61,10 @@ mapping clause encdec =
     0b010000 @ bo : bits(5) @ bi : bits(5) @ bd : bits(14) @ aa : bits(1) @ lk : bits(1)
 
 function clause execute(BC(bo, bi, bd, aa, lk)) = {
-  if lk == 0b1 then LR = CIA + 4;  /* LR is set whether or not taken */
+  if lk == 0b1 then { harness_wrote(hw_lr); LR = CIA + 4 };  /* LR is set whether or not taken */
   if branch_cond_taken(bo, bi) then {
     let offset : word = exts(bd @ 0b00);
+    harness_wrote(hw_nia);
     NIA = if aa == 0b1 then offset else CIA + offset
   };
   COMPLETED
@@ -88,8 +91,8 @@ mapping clause encdec =
 
 function clause execute(BCLR(bo, bi, lk)) = {
   let target : word = LR & 0xFFFFFFFC;
-  if lk == 0b1 then LR = CIA + 4;  /* LR is set whether or not taken */
-  if branch_cond_taken(bo, bi) then NIA = target;
+  if lk == 0b1 then { harness_wrote(hw_lr); LR = CIA + 4 };  /* LR is set whether or not taken */
+  if branch_cond_taken(bo, bi) then { harness_wrote(hw_nia); NIA = target };
   COMPLETED
 }
 
@@ -101,14 +104,14 @@ mapping clause encdec =
 
 function clause execute(BCCTR(bo, bi, lk)) = {
   let target : word = CTR & 0xFFFFFFFC;
-  if lk == 0b1 then LR = CIA + 4;
+  if lk == 0b1 then { harness_wrote(hw_lr); LR = CIA + 4 };
   /* INVALID-FORM: BO[2]=0 asks for "decrement and test CTR", which is
    * invalid for bcctr because CTR is also the target.  The 601 defines it
    * (ch. 10 bcctrx page): CTR is decremented and the decremented value is
    * what the CTR test sees, but instruction fetching goes to the address
    * taken from the nondecremented CTR — which is what `target`, read
    * above, holds.  branch_cond_taken does the decrement for us. */
-  if branch_cond_taken(bo, bi) then NIA = target;
+  if branch_cond_taken(bo, bi) then { harness_wrote(hw_nia); NIA = target };
   COMPLETED
 }
 

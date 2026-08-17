@@ -59,9 +59,12 @@ function core_tick() = {
      * clearing keeps the remainder, which matters only if a tick could ever
      * straddle the boundary; it cannot, since 10^9 is a whole number of
      * 128 ns ticks, but it costs nothing to be exact. */
+    harness_wrote(hw_rtcl);
     RTCL = (RTCL + ticks * rtc_tick_ns) & rtcl_implemented;
     if unsigned(RTCL) >= rtc_second_ns then {
+      harness_wrote(hw_rtcl);
       RTCL = RTCL - rtc_second_ns;
+      harness_wrote(hw_rtcu);
       RTCU = RTCU + 1
     };
     /* set_dec latches the exception request on the 0 -> 1 transition of

@@ -42,9 +42,14 @@ function exception_base() =
 val take_exception : (PPCException, word, bits(16)) -> unit
 function take_exception(e, srr0_val, srr1_hi) = {
   clear_reservation();
+  harness_wrote(hw_srr0);
   SRR0 = srr0_val;
   /* SRR1 = exception-specific high half @ MSR[16:31] (manual numbering) */
+  harness_wrote(hw_srr1);
   SRR1 = srr1_hi @ MSR.bits[15 .. 0];
+  /* One note for the whole MSR update below: every path through it writes at
+   * least the eight bits Table 5-6 clears, and the MSR is one state element. */
+  harness_wrote(hw_msr);
   /* MSR update on exception entry (Table 5-6): clear EE PR FP FE0 SE FE1
    * IT DT; EP unaltered; ME unaltered except that a machine check clears it,
    * so that a second one checkstops rather than losing the saved state. */
@@ -60,6 +65,7 @@ function take_exception(e, srr0_val, srr1_hi) = {
   MSR[FE1] = 0b0;
   MSR[IT] = 0b0;
   MSR[DT] = 0b0;
+  harness_wrote(hw_nia);
   NIA = exception_base() | core_exception_vector(e);
   /* Sole choke point for "an exception was taken", so the sole place a test
    * harness needs to observe it (ppc_harness.sail); no-op in every ordinary
@@ -129,7 +135,9 @@ function dsisr_of_fault(cause, is_store) = {
  * DAR holds the effective address of the access (Table 5-10). */
 val data_access_fault : (FaultCause, word, bool) -> Completion
 function data_access_fault(cause, ea, is_store) = {
+  harness_wrote(hw_dar);
   DAR = ea;
+  harness_wrote(hw_dsisr);
   DSISR = dsisr_of_fault(cause, is_store);
   data_access_exception()
 }
@@ -184,7 +192,9 @@ function dsisr_align_image(instr) = {
  * generic image is used there too. */
 val alignment_exception : word -> Completion
 function alignment_exception(ea) = {
+  harness_wrote(hw_dar);
   DAR = ea;
+  harness_wrote(hw_dsisr);
   DSISR = dsisr_align_image(cur_instr);
   take_exception(E_Alignment, CIA, 0x0000);
   EXCEPTION_TAKEN

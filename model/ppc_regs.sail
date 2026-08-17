@@ -39,7 +39,7 @@ val rGPR : ridx -> word
 function rGPR(r) = GPRs[unsigned(r)]
 
 val wGPR : (ridx, word) -> unit
-function wGPR(r, v) = { GPRs[unsigned(r)] = v }
+function wGPR(r, v) = { harness_wrote(hw_gpr0 + (0b000 @ r)); GPRs[unsigned(r)] = v }
 
 overload GPR = {rGPR, wGPR}
 
@@ -47,7 +47,7 @@ val rFPR : fridx -> bits(64)
 function rFPR(r) = FPRs[unsigned(r)]
 
 val wFPR : (fridx, bits(64)) -> unit
-function wFPR(r, v) = { FPRs[unsigned(r)] = v }
+function wFPR(r, v) = { harness_wrote(hw_fpr0 + (0b000 @ r)); FPRs[unsigned(r)] = v }
 
 overload FPR = {rFPR, wFPR}
 
@@ -63,7 +63,10 @@ val rCRfield : forall 'n, 0 <= 'n < 8. int('n) -> bits(4)
 function rCRfield(n) = slice(CR, 28 - 4 * n, 4)
 
 val wCRfield : forall 'n, 0 <= 'n < 8. (int('n), bits(4)) -> unit
-function wCRfield(n, v) = { CR = update_subrange_bits(CR, 31 - 4 * n, 28 - 4 * n, v) }
+function wCRfield(n, v) = {
+  harness_note_write(hw_cr, sail_shiftleft(0x0000000F, 28 - 4 * n));
+  CR = update_subrange_bits(CR, 31 - 4 * n, 28 - 4 * n, v)
+}
 
 overload CRfield = {rCRfield, wCRfield}
 
@@ -73,7 +76,10 @@ val rCRbit : bits(5) -> bits(1)
 function rCRbit(bi) = [CR[31 - unsigned(bi)]]
 
 val wCRbit : (bits(5), bits(1)) -> unit
-function wCRbit(bi, v) = { CR[31 - unsigned(bi)] = v[0] }
+function wCRbit(bi, v) = {
+  harness_note_write(hw_cr, sail_shiftleft(0x00000001, 31 - unsigned(bi)));
+  CR[31 - unsigned(bi)] = v[0]
+}
 
 overload CRbit = {rCRbit, wCRbit}
 
@@ -91,6 +97,14 @@ bitfield Xer : word = {
   BC : 6 .. 0     /* manual bits 25-31: byte count for lswx/stswx/lscbx     */
 }
 register XER : Xer
+
+/* Which bits of XER each named field occupies, for the harness write hook
+ * (ppc_harness.sail).  Derived from the bitfield above rather than written
+ * out, so that moving a field moves its mask with it. */
+let hw_xer_so : word = [Mk_Xer(zeros(32)) with SO = 0b1].bits
+let hw_xer_ov : word = [Mk_Xer(zeros(32)) with OV = 0b1].bits
+let hw_xer_ca : word = [Mk_Xer(zeros(32)) with CA = 0b1].bits
+let hw_xer_bc : word = [Mk_Xer(zeros(32)) with BC = 0b1111111].bits
 
 /* Standard CR0 update for Rc=1 integer instructions: LT/GT/EQ from a signed
  * compare of the result with zero, SO copied from XER[SO]. */
@@ -139,7 +153,7 @@ register MSR : Msr
 let msr_implemented : word = 0x0000FD70
 
 val write_msr : word -> unit
-function write_msr(v) = { MSR = Mk_Msr(v & msr_implemented) }
+function write_msr(v) = { harness_wrote(hw_msr); MSR = Mk_Msr(v & msr_implemented) }
 
 val privilege_level : unit -> PrivilegeLevel
 function privilege_level() = if MSR[PR] == 0b1 then User else Supervisor
@@ -191,6 +205,17 @@ bitfield Fpscr : word = {
 }
 register FPSCR : Fpscr
 
+/* Masks for the harness write hook, as for XER above: the FPSCR is written a
+ * field at a time by fpscr_raise and friends (ppc_insts_fp.sail), and a
+ * consumer that names the fields separately needs to know which one moved. */
+let hw_fpscr_fx   : word = [Mk_Fpscr(zeros(32)) with FX = 0b1].bits
+let hw_fpscr_fex  : word = [Mk_Fpscr(zeros(32)) with FEX = 0b1].bits
+let hw_fpscr_vx   : word = [Mk_Fpscr(zeros(32)) with VX = 0b1].bits
+let hw_fpscr_fr   : word = [Mk_Fpscr(zeros(32)) with FR = 0b1].bits
+let hw_fpscr_fi   : word = [Mk_Fpscr(zeros(32)) with FI = 0b1].bits
+let hw_fpscr_fprf : word = [Mk_Fpscr(zeros(32)) with FPRF = 0b11111].bits
+let hw_fpscr_fpcc : word = [Mk_Fpscr(zeros(32)) with FPCC = 0xF].bits
+
 /* --- Exception handling registers (OEA, §2.3.3) ------------------------- */
 
 register SRR0 : word    /* SPR 26: saved PC                    */
@@ -224,6 +249,7 @@ val set_dec : word -> unit
 function set_dec(v) = {
   let next = v & dec_implemented;
   if (DEC[31] == bitzero) & (next[31] == bitone) then DEC_pending = true;
+  harness_wrote(hw_dec);
   DEC = next
 }
 
@@ -282,7 +308,7 @@ val rSR : sridx -> SegReg
 function rSR(n) = Mk_SegReg(SRs[unsigned(n)])
 
 val wSR : (sridx, word) -> unit
-function wSR(n, v) = { SRs[unsigned(n)] = v }
+function wSR(n, v) = { harness_wrote(hw_sr0 + (0b0000 @ n)); SRs[unsigned(n)] = v }
 
 /* --- Common reset ------------------------------------------------------- */
 

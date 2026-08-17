@@ -140,4 +140,27 @@ register DABR : P601_Dabr
 /* HID15 = PIR (SPR 1023): 4-bit processor ID tag (§2.3.3.13.5). */
 register PIR : word
 
+/* --- Harness register ids for the 601's own registers -------------------- */
+
+/* Ids for harness_note_write (ppc_harness.sail), which reserves 0x80 and up
+ * for the core so that the common file never has to know what a core added.
+ * None of these is architectural; see ppc_harness.sail for what they are for
+ * and c/harness_hooks.h for the C side that has to agree with them. */
+let hw_mq    : bits(8) = 0x80
+let hw_rtcu  : bits(8) = 0x81
+let hw_rtcl  : bits(8) = 0x82
+let hw_hid0  : bits(8) = 0x83
+let hw_hid1  : bits(8) = 0x84
+let hw_iabr  : bits(8) = 0x85
+let hw_dabr  : bits(8) = 0x86
+let hw_pir   : bits(8) = 0x87
+let hw_batu0 : bits(8) = 0x88
+let hw_batu1 : bits(8) = 0x89
+let hw_batu2 : bits(8) = 0x8A
+let hw_batu3 : bits(8) = 0x8B
+let hw_batl0 : bits(8) = 0x8C
+let hw_batl1 : bits(8) = 0x8D
+let hw_batl2 : bits(8) = 0x8E
+let hw_batl3 : bits(8) = 0x8F
+
 $endif

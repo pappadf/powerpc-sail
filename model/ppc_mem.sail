@@ -72,10 +72,10 @@ function le_munge(addr, width) =
 register reservation_valid : bool
 
 val set_reservation : unit -> unit
-function set_reservation() = { reservation_valid = true }
+function set_reservation() = { harness_wrote(hw_reservation); reservation_valid = true }
 
 val clear_reservation : unit -> unit
-function clear_reservation() = { reservation_valid = false }
+function clear_reservation() = { harness_wrote(hw_reservation); reservation_valid = false }
 
 val reset_reservation : unit -> unit
 function reset_reservation() = { reservation_valid = false }
@@ -120,6 +120,26 @@ function phys_fetch(paddr) = {
   let pa = le_munge(paddr, 4);
   harness_note_mem(harness_mem_fetch, pa, 0x04);
   reverse_endianness(read_ram(32, 4, zeros(32), pa))
+}
+
+/* Page-table-entry accesses, used only by the page table walk in
+ * ppc_mmu.sail.  Identical to phys_read/phys_write at width 4 — a PTE is a
+ * word, the walk never munges (le_munge applies to the ACCESS the program
+ * asked for, not to the tables that describe it) — and spelled out separately
+ * for one reason: so that the walk's traffic is noted under its own access
+ * kind.  Without that a harness cannot tell the MMU's reads and its R/C-bit
+ * writeback from the instruction's own loads and stores, and must attribute
+ * both to the instruction (MPC601UM §6.8.4, §6.9.2). */
+val phys_read_pte : bits(32) -> bits(32)
+function phys_read_pte(paddr) = {
+  harness_note_mem(harness_mem_walk_read, paddr, 0x04);
+  reverse_endianness(read_ram(32, 4, zeros(32), paddr))
+}
+
+val phys_write_pte : (bits(32), bits(32)) -> unit
+function phys_write_pte(paddr, data) = {
+  harness_note_mem(harness_mem_walk_write, paddr, 0x04);
+  write_ram(32, 4, zeros(32), paddr, reverse_endianness(data))
 }
 
 $endif

@@ -81,8 +81,9 @@ function add_with_carry(a, b, cin) = {
 val arith_result : (ridx, word, bits(1), bits(1), bits(1)) -> unit
 function arith_result(rD, res, ov, oe, rc) = {
   if oe == 0b1 then {
+    harness_note_write(hw_xer, hw_xer_ov);
     XER[OV] = ov;
-    if ov == 0b1 then XER[SO] = 0b1
+    if ov == 0b1 then { harness_note_write(hw_xer, hw_xer_so); XER[SO] = 0b1 }
   };
   GPR(rD) = res;
   if rc == 0b1 then set_cr0(res)
@@ -93,7 +94,7 @@ function arith_result(rD, res, ov, oe, rc) = {
 val exec_add_sub : (ridx, word, word, bits(1), bool, bits(1), bits(1)) -> Completion
 function exec_add_sub(rD, a, b, cin, ca, oe, rc) = {
   let (res, cout, ov) = add_with_carry(a, b, cin);
-  if ca then XER[CA] = cout;
+  if ca then { harness_note_write(hw_xer, hw_xer_ca); XER[CA] = cout };
   arith_result(rD, res, ov, oe, rc);
   COMPLETED
 }
@@ -738,6 +739,7 @@ function exec_sra(rA, s, n, fill, rc) = {
   let lost = s & not_vec(sail_shiftleft(ones(32), n));
   let res = if fill then (if neg then ones(32) else zeros(32))
             else sail_arith_shiftright(s, n);
+  harness_note_write(hw_xer, hw_xer_ca);
   XER[CA] = bool_to_bits(neg & (if fill then s != zeros(32) else lost != zeros(32)));
   logical_result(rA, res, rc)
 }

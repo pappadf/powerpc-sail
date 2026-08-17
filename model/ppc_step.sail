@@ -34,7 +34,9 @@ function step() = {
    * order of Table 5-3 (§5.1.2). */
   let _ = check_interrupts();
 
+  harness_wrote(hw_cia);
   CIA = NIA;
+  harness_wrote(hw_nia);
   NIA = CIA + 4;
 
   match translate_addr(CIA, Mem_fetch) {
