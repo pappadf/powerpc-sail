@@ -60,7 +60,11 @@ function take_exception(e, srr0_val, srr1_hi) = {
   MSR[FE1] = 0b0;
   MSR[IT] = 0b0;
   MSR[DT] = 0b0;
-  NIA = exception_base() | core_exception_vector(e)
+  NIA = exception_base() | core_exception_vector(e);
+  /* Sole choke point for "an exception was taken", so the sole place a test
+   * harness needs to observe it (ppc_harness.sail); no-op in every ordinary
+   * build. */
+  harness_note_exception(NIA)
 }
 
 /* Convenience wrappers ---------------------------------------------------- */
