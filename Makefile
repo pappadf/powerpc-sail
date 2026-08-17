@@ -50,6 +50,7 @@ SAIL_SRCS := \
 	$(MODEL)/ppc_regs.sail \
 	$(CORE_DIR)/$(CORE)_regs.sail \
 	$(MODEL)/ppc_debug.sail \
+	$(MODEL)/ppc_harness.sail \
 	$(MODEL)/ppc_softfloat.sail \
 	$(MODEL)/ppc_mem.sail \
 	$(MODEL)/ppc_mmu.sail \
@@ -75,8 +76,15 @@ SAIL_SRCS := \
 BUILD := build
 EMULATOR := $(BUILD)/ppc_$(CORE)
 
+C_DIR := c
+
 CC ?= gcc
-C_FLAGS = -O2 -I $(SAIL_LIB_DIR)
+# -include harness_hooks.h: Sail emits calls to an `extern` val but no
+# declaration for it, so without this the generated code calls the hooks
+# implicitly-declared and gcc warns (and, in principle, could get the ABI
+# wrong).  Forcing the header in front of every translation unit is the
+# smallest fix and costs nothing.
+C_FLAGS = -O2 -I $(SAIL_LIB_DIR) -I $(C_DIR) -include $(C_DIR)/harness_hooks.h
 C_LIBS := -lgmp -lz
 # sail_failure.c provides sail_match_failure, which the generated code calls
 # when a mapping has no clause for a value — the `assembly` mapping's failure
@@ -114,7 +122,8 @@ TEST_SRCS := $(sort $(wildcard $(TEST_DIR)/*.S))
 TEST_ELFS := $(patsubst $(TEST_DIR)/%.S,$(BUILD)/$(TEST_DIR)/%.elf,$(TEST_SRCS))
 TEST_BINS := $(TEST_ELFS:.elf=.bin)
 
-.PHONY: all check check-assembly emulator run test test-elfs test-disasm test-accept clean
+.PHONY: all check check-assembly emulator run test test-elfs test-disasm test-accept \
+        harness harness-cov harness-test clean
 .PRECIOUS: $(BUILD)/$(TEST_DIR)/%.elf $(BUILD)/$(TEST_DIR)/%.bin
 
 all: check
@@ -145,13 +154,65 @@ $(BUILD)/model.c: $(SAIL_SRCS)
 	mkdir -p $(BUILD)
 	$(SAIL) -c $(SAIL_SRCS) -o $(basename $@)
 
-$(EMULATOR): $(BUILD)/model.c
-	$(CC) $(C_FLAGS) $< $(C_SRCS) $(C_LIBS) -o $@
+$(EMULATOR): $(BUILD)/model.c $(C_DIR)/harness_hooks_noop.c $(C_DIR)/harness_hooks.h
+	$(CC) $(C_FLAGS) $< $(C_DIR)/harness_hooks_noop.c $(C_SRCS) $(C_LIBS) -o $@
 
 emulator: $(EMULATOR)
 
 run: $(EMULATOR)
 	./$(EMULATOR) $(RUN_FLAGS)
+
+# --- Single-step test harness ------------------------------------------------
+# A second front end for the same model: instead of running a program to a
+# halt, it reads a line-oriented command stream (RESET / SET / MEM / OPCODE /
+# STEP) and reports, per instruction, the whole architected state plus the
+# footprint — which registers were written, which physical addresses were
+# read, written and fetched.  See c/harness.c for the protocol.
+#
+# It needs a model WITHOUT sail's generated main(), since it supplies its own,
+# so the C is generated a second time with --c-no-main.  Generating into its
+# own directory keeps the header called model.h, which is what the generated
+# .c includes.
+HARNESS := $(BUILD)/ppc_$(CORE)_harness
+HARNESS_COV := $(BUILD)/ppc_$(CORE)_harness_cov
+HARNESS_SRCS := $(C_DIR)/harness.c
+HARNESS_DEPS := $(HARNESS_SRCS) $(C_DIR)/harness_hooks.h
+
+$(BUILD)/harness/model.c: $(SAIL_SRCS)
+	mkdir -p $(dir $@)
+	$(SAIL) -c --c-no-main $(SAIL_SRCS) -o $(basename $@)
+
+$(HARNESS): $(BUILD)/harness/model.c $(HARNESS_DEPS)
+	$(CC) $(C_FLAGS) -I $(dir $<) $< $(HARNESS_SRCS) $(C_SRCS) $(C_LIBS) -o $@
+
+harness: $(HARNESS)
+
+# Coverage build.  `sail -c --c-coverage <file>` instruments every branch and
+# function entry and writes the full list of instrumentable locations to
+# <file>; the running model then calls sail_branch_reached() and friends.
+#
+# Sail ships the runtime for those calls as lib/coverage/libsail_coverage.a,
+# but it only ever accumulates into one global set and dumps it at exit, which
+# cannot answer the question the vector generator asks ("what did THIS step
+# cover?").  c/harness_cov.c provides the same five entry points with per-step
+# bitmaps as well as the accumulated sailcov-format dump, so the stock library
+# is deliberately not linked.  NOTE the `sailcov` post-processing tool is a
+# separate Sail binary and is not required by, or used in, this build.
+$(BUILD)/harness-cov/model.c: $(SAIL_SRCS)
+	mkdir -p $(dir $@)
+	$(SAIL) -c --c-no-main --c-coverage $(BUILD)/harness-cov/model.branches \
+	        $(SAIL_SRCS) -o $(basename $@)
+
+$(HARNESS_COV): $(BUILD)/harness-cov/model.c $(HARNESS_DEPS) $(C_DIR)/harness_cov.c
+	$(CC) $(C_FLAGS) -DPPC_HARNESS_COVERAGE=1 -I $(dir $<) $< \
+	      $(HARNESS_SRCS) $(C_DIR)/harness_cov.c $(C_SRCS) $(C_LIBS) -o $@
+
+harness-cov: $(HARNESS_COV)
+
+# Exercise the harness end to end: instruction results, memory footprints,
+# exceptions, determinism and batch throughput.  Pure shell + the harness.
+harness-test: $(HARNESS)
+	@$(TEST_DIR)/harness/run.sh ./$(HARNESS)
 
 $(BUILD)/$(TEST_DIR)/%.elf: $(TEST_DIR)/%.S $(TEST_DIR)/link.ld $(TEST_DIR)/testlib.h
 	@command -v $(TEST_CC) >/dev/null 2>&1 || \

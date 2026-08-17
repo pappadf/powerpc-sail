@@ -86,23 +86,40 @@ val write_ram = impure "write_ram" : forall 'n 'm.
 val read_ram = impure "read_ram" : forall 'n 'm.
   (int('m), int('n), bits('m), bits('m)) -> bits(8 * 'n)
 
+/* These three functions are the only places physical memory is touched, which
+ * is why the test-harness footprint hooks (ppc_harness.sail) sit here: one
+ * call each, before the access, and nothing else in the model needs to know
+ * they exist. */
+
 /* Read 'n bytes at a physical address, returning them big-endian
  * (i.e. byte at lowest address = most significant). */
 val phys_read : forall 'n, 'n in {1, 2, 4, 8}. (bits(32), int('n)) -> bits(8 * 'n)
-function phys_read(paddr, width) =
+function phys_read(paddr, width) = {
+  harness_note_mem(harness_mem_read, paddr, get_slice_int(8, width, 0));
   reverse_endianness(read_ram(32, width, zeros(32), paddr))
+}
 
 val phys_write : forall 'n, 'n in {1, 2, 4, 8}. (bits(32), int('n), bits(8 * 'n)) -> unit
-function phys_write(paddr, width, data) =
+function phys_write(paddr, width, data) = {
+  harness_note_mem(harness_mem_write, paddr, get_slice_int(8, width, 0));
   write_ram(32, width, zeros(32), paddr, reverse_endianness(data))
+}
 
 /* Instruction fetch from a physical address.  The instruction word itself is
  * always read big-endian; little-endian mode swaps the two words within a
  * double word before they reach the instruction queue (§2.4.3.3), which the
  * width-4 munge expresses — so in LE mode the instruction at address A comes
  * from the word stored at A xor 4, and LE code has to be laid out with each
- * aligned pair of instructions exchanged. */
+ * aligned pair of instructions exchanged.
+ *
+ * Spelled out rather than delegating to phys_read so that the access is noted
+ * once, as a fetch: a harness that wants to exclude instruction fetch from an
+ * instruction's memory footprint must be able to tell the two apart. */
 val phys_fetch : bits(32) -> bits(32)
-function phys_fetch(paddr) = phys_read(le_munge(paddr, 4), 4)
+function phys_fetch(paddr) = {
+  let pa = le_munge(paddr, 4);
+  harness_note_mem(harness_mem_fetch, pa, 0x04);
+  reverse_endianness(read_ram(32, 4, zeros(32), pa))
+}
 
 $endif
