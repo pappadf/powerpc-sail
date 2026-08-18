@@ -844,5 +844,274 @@ check "mmu-walk-fetch" '^S gpr3 |^(FW|FMR|FMW|FF|FTR|FTW|EXC|ERR|DONE)'
 } > "$TMP/case"
 check "memory-tracking-full-window" '^S gpr6 |^(FMR|FMW|M |ERR|DONE)'
 
+# ---------------------------------------------------------------------------
+# 17. A store with update and rA = 0 must NOT write r0 (§3.5.3, §3.5.8).
+#     "The PowerPC architecture defines store with update instructions with
+#     rA = 0 as an invalid form.  In the POWER architecture, this form is not
+#     considered invalid and in this case rA is not updated.  To maintain
+#     compatibility with POWER in this case, the 601 does not update register
+#     r0." (§3.5.3) — and §3.5.8 says the identical thing about all eight
+#     floating-point update forms: "the 601 accesses memory for these cases
+#     but inhibits the update of the integer register r0".
+#     The model suppressed this for loads only, so a store still clobbered r0.
+#     Both halves matter: r0 keeps its value AND the access still happens, so
+#     each case checks the memory footprint as well as the register.
+#       0x94A00010  stwu   r5,0x10(r0)
+#       0xDC200010  stfdu  f1,0x10(r0)
+#       0xCC200020  lfdu   f1,0x20(r0)   (the load, already correct)
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET gpr0 0x00100000
+SET gpr5 0xCAFEBABE
+OPCODE 0x94A00010
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET gpr0 0x00100000
+SET fpr1 0x400921FB54442D18
+OPCODE 0xDC200010
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET gpr0 0x00100000
+MEM 0x00100020 400921FB54442D18
+OPCODE 0xCC200020
+STEP
+QUIT
+---
+S gpr0 0x00100000
+S fpr1 0x0000000000000000
+M 0x00100010 CAFEBABE
+FW nia
+FMW 0x00100010 4
+EXC none
+DONE
+S gpr0 0x00100000
+S fpr1 0x400921FB54442D18
+M 0x00100010 400921FB54442D18
+FW nia
+FMW 0x00100010 8
+EXC none
+DONE
+S gpr0 0x00100000
+S fpr1 0x400921FB54442D18
+FW fpr1
+FW nia
+FMR 0x00100020 8
+EXC none
+DONE
+EOF
+check "store-update-ra0-keeps-r0" '^S (gpr0|fpr1) |^(M |FW|FMR|FMW|EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 17b. The suppression is rA = 0 and NOTHING ELSE.  §3.5.3's other rule is
+#      "if rS = rA, the contents of register rS are copied to the target
+#      memory element, then the generated EA is placed into rA" — so a store
+#      to its own address register still writes back; only a LOAD has the
+#      rA = rD conflict.  And the X-form update carries the rA = 0 rule too.
+#        0x94840010  stwu  r4,0x10(r4)   rS = rA = 4, writeback expected
+#        0x7CA0196E  stwux r5,r0,r3      rA = 0, no writeback
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET gpr4 0x00100000
+OPCODE 0x94840010
+STEP
+RESET
+SET cia 0x00100000
+SET gpr0 0x00100000
+SET gpr3 0x00000010
+SET gpr5 0xCAFEBABE
+OPCODE 0x7CA0196E
+STEP
+QUIT
+---
+S gpr0 0x00000000
+S gpr4 0x00100010
+M 0x00100011 10
+FW gpr4
+FW nia
+FMW 0x00100010 4
+EXC none
+DONE
+S gpr0 0x00100000
+S gpr4 0x00000000
+M 0x00100010 CAFEBABE
+FW nia
+FMW 0x00100010 4
+EXC none
+DONE
+EOF
+check "store-update-ra-equals-rs-still-writes" '^S (gpr0|gpr4) |^(M |FW|FMW|EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 18. ecowx sets DSISR bit 6, eciwx clears it (Table 3-47, §3.9).
+#     ecowx: "If the EAR[E] = 0, a data access exception is invoked, with bit
+#     11 of DSISR set to 1, and bit 6 set to 1 to indicate that the exception
+#     occurred during a store operation."  eciwx says bit 6 "cleared to 0 to
+#     indicate that the exception occurred during a load operation".
+#     Manual bit 6 is sail bit 25, 0x02000000 — the same constant
+#     dsisr_of_fault uses for an ordinary store fault.  So the two DSISR
+#     images are 0x02100000 and 0x00100000; the model used to emit the load
+#     image for both.
+#       0x7CA01B6C  ecowx r5,0,r3
+#       0x7CA01A6C  eciwx r5,0,r3
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET gpr3 0x00100000
+SET gpr5 0xCAFEBABE
+OPCODE 0x7CA01B6C
+STEP
+RESET
+SET cia 0x00100000
+SET gpr3 0x00100000
+OPCODE 0x7CA01A6C
+STEP
+QUIT
+---
+S dar 0x00100000
+S dsisr 0x02100000
+EXC 0x00000300
+DONE
+S dar 0x00100000
+S dsisr 0x00100000
+EXC 0x00000300
+DONE
+EOF
+check "ecowx-dsisr-store-bit" '^S (dar|dsisr) |^(EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 19. fmul propagates frC's NaN (§2.5.2.7).
+#     "If the operand specified by frA is a NaN, that NaN is stored as the
+#     result.  Otherwise, if the operand specified by frB is a NaN (IF THE
+#     INSTRUCTION SPECIFIES AN FRB OPERAND), that NaN is stored as the
+#     result.  Otherwise, if the operand specified by frC is a NaN ..."
+#     fmul has no frB — the field is reserved — so the frB slot is skipped.
+#     The model used to fill it with the default QNaN, which is itself a NaN
+#     and so won the test every time, and frC's payload was lost.
+#       0xFC2200F2  fmul f1,f2,f3
+#     Three cases: frC QNaN alone (payload must survive), frA SNaN as well
+#     (frA still wins, quietened), and frC SNaN alone (quietened payload,
+#     VXSNAN raised).
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpr2 0x4000000000000000
+SET fpr3 0x7FF8000ABCDEF000
+OPCODE 0xFC2200F2
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpr2 0x7FF1111100000000
+SET fpr3 0x7FF8000ABCDEF000
+OPCODE 0xFC2200F2
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpr2 0x4000000000000000
+SET fpr3 0x7FF0000ABCDEF000
+OPCODE 0xFC2200F2
+STEP
+QUIT
+---
+S fpr1 0x7FF8000ABCDEF000
+S fpscr.vxsnan 0x0
+S fpscr.fprf 0x11
+EXC none
+DONE
+S fpr1 0x7FF9111100000000
+S fpscr.vxsnan 0x1
+S fpscr.fprf 0x11
+EXC none
+DONE
+S fpr1 0x7FF8000ABCDEF000
+S fpscr.vxsnan 0x1
+S fpscr.fprf 0x11
+EXC none
+DONE
+EOF
+check "fmul-propagates-frc-nan" '^S (fpr1|fpscr\.(vxsnan|fprf)) |^(EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 20. A DISABLED overflow clears FPSCR[FR] and FPSCR[FI]; a disabled
+#     underflow does not (§5.4.7.4.1, §5.4.7.5.1).
+#     The overflow action list for FPSCR[OE] = 0 ends: "The result is placed
+#     into the target FPR / FPSCR[FR FI] are cleared / FPSCR[FPRF] is set to
+#     indicate the class and sign of the result."  Table 2-1's bit-14 gloss
+#     ("an inexact fraction or a disabled overflow exception") reads the
+#     other way; the specific per-condition list governs, and the model used
+#     to follow the table and leave FI set.
+#     The UNDERFLOW list for FPSCR[UE] = 0 is three items — UX, the target
+#     FPR, FPRF — and says nothing about FR/FI, so §2.5.6's ordinary
+#     "rounding occurred" rule stands there and both bits stay as rounded.
+#     Keeping the two in one case is the point: they are asymmetric.
+#       0xFC201018  frsp f1,f2   with 1e300, which overflows single
+#       0xFC2200F2  fmul f1,f2,f3 with (smallest normal + 3ulp) * 0.5,
+#                                 which is tiny and inexact
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpr2 0x7E37E43C8800759C
+OPCODE 0xFC201018
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpscr.rn 0x1
+SET fpr2 0x7E37E43C8800759C
+OPCODE 0xFC201018
+STEP
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET fpr2 0x0010000000000003
+SET fpr3 0x3FE0000000000000
+OPCODE 0xFC2200F2
+STEP
+QUIT
+---
+S fpr1 0x7FF0000000000000
+S fpscr.ox 0x1
+S fpscr.ux 0x0
+S fpscr.xx 0x1
+S fpscr.fr 0x0
+S fpscr.fi 0x0
+S fpscr.fprf 0x05
+EXC none
+DONE
+S fpr1 0x47EFFFFFE0000000
+S fpscr.ox 0x1
+S fpscr.ux 0x0
+S fpscr.xx 0x1
+S fpscr.fr 0x0
+S fpscr.fi 0x0
+S fpscr.fprf 0x04
+EXC none
+DONE
+S fpr1 0x0008000000000002
+S fpscr.ox 0x0
+S fpscr.ux 0x1
+S fpscr.xx 0x1
+S fpscr.fr 0x1
+S fpscr.fi 0x1
+S fpscr.fprf 0x14
+EXC none
+DONE
+EOF
+check "disabled-overflow-clears-fr-fi" '^S (fpr1|fpscr\.(ox|ux|xx|fr|fi|fprf)) |^(EXC|ERR|DONE)'
+
 echo "$pass/$((pass + fail)) harness tests passed"
 [ "$fail" -eq 0 ]

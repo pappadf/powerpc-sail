@@ -108,7 +108,7 @@ function fp_unavailable_exception() = {
 
 /* Data access exception (§5.4.3): DSISR and DAR must be set by the caller
  * before calling this — data_access_fault below does that for a translation
- * fault, and eciwx/ecowx set DSISR[11] themselves. */
+ * fault, and eciwx/ecowx set DSISR[11] (and, for ecowx, [6]) themselves. */
 val data_access_exception : unit -> Completion
 function data_access_exception() = {
   take_exception(E_DataAccess, CIA, 0x0000);

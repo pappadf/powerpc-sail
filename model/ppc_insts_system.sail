@@ -268,7 +268,8 @@ function clause execute(TLBIE(_rB)) =
  * Both are user-level — EAR[E] is what gates them — and both compute the
  * ordinary X-form EA (rA|0)+(rB).  Three outcomes (ch. 10 pages, §6.10):
  *
- *  - EAR[E]=0: data access exception with DSISR[11] set (Table 5-10);
+ *  - EAR[E]=0: data access exception with DSISR[11] set (Table 5-10), plus
+ *    DSISR[6] for ecowx only (Table 3-47, and external_control_fault below);
  *  - the EA lies in an I/O controller interface segment (SR[T]=1): no-op;
  *  - otherwise the word goes to or comes from a device, and no device is
  *    modelled — a scaffold hole that throws rather than inventing data.
@@ -279,12 +280,28 @@ function clause execute(TLBIE(_rB)) =
  * do about that here, since translation is not consulted on either of the
  * two paths the model can complete. */
 
-val external_control_fault : word -> Completion
-function external_control_fault(ea) = {
+/* The EAR[E]=0 data access exception both instructions take (Table 3-47).
+ * Manual bit 11 says what happened; manual bit 6 says which direction the
+ * access was going, exactly as it does for an ordinary translation fault
+ * (dsisr_of_fault in ppc_exceptions.sail, same 0x02000000).  The table
+ * states it separately for each instruction and they differ:
+ *
+ *   ecowx — "a data access exception is invoked, with bit 11 of DSISR set to
+ *            1, and bit 6 SET TO 1 to indicate that the exception occurred
+ *            during a store operation"
+ *   eciwx — "... and bit 6 CLEARED TO 0 to indicate that the exception
+ *            occurred during a load operation"
+ *
+ * so ecowx leaves 0x02100000 and eciwx 0x00100000.  `is_store` is a
+ * parameter rather than two copies of the function because the rest of the
+ * sequence — DAR, the vector, SRR0/SRR1 — is identical. */
+val external_control_fault : (word, bool) -> Completion
+function external_control_fault(ea, is_store) = {
   harness_wrote(hw_dar);
   DAR = ea;
   harness_wrote(hw_dsisr);
-  DSISR = 0x00100000;   /* manual bit 11: eciwx/ecowx with EAR[E]=0 */
+  DSISR = 0x00100000                                  /* manual bit 11 */
+          | (if is_store then 0x02000000 else zeros(32));  /* manual bit 6 */
   data_access_exception()
 }
 
@@ -300,7 +317,7 @@ mapping clause encdec =
 
 function clause execute(ECIWX(_rD, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if EAR[E] == 0b0 then external_control_fault(ea)
+  if EAR[E] == 0b0 then external_control_fault(ea, false)
   else if ea_in_io_segment(ea) then COMPLETED
   else throw(Model_unimplemented("eciwx: no external control device"))
 }
@@ -313,7 +330,7 @@ mapping clause encdec =
 
 function clause execute(ECOWX(_rS, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if EAR[E] == 0b0 then external_control_fault(ea)
+  if EAR[E] == 0b0 then external_control_fault(ea, true)
   else if ea_in_io_segment(ea) then COMPLETED
   else throw(Model_unimplemented("ecowx: no external control device"))
 }
