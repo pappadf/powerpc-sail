@@ -1,6 +1,7 @@
 /* store.S — every integer store form: byte/halfword/word, D-form, X-form
  * and both update variants, plus the rA = 0 update form that the 601
- * executes rather than treating as invalid.
+ * executes (storing to memory) rather than treating as invalid, and whose
+ * writeback to r0 it inhibits (§3.5.3).
  *
  * Each group stores into a fresh part of the scratch area and reads a whole
  * word back, so untouched bytes (which read as zero) show exactly how far
@@ -9,7 +10,7 @@
  * Expected (hex): r04=11223344 r05=44003344 r06=11223344 r07=10 r08=AABBCCDD
  *   r09=12 r10=14 r11=DD00CCDD r12=AABBCCDD r13=4024 r14=00443344
  *   r15=11223344 r16=4 r17=403C r18=DD000000 r19=CCDD0000 r20=AABBCCDD
- *   r21=4044 r22=11223344 r31=4000.
+ *   r21=4040 r22=11223344 r31=4000.
  */
 
 #include "testlib.h"
@@ -60,12 +61,15 @@ _start:
 
 	/* --- store with update and rA = 0 -------------------------------
 	 * The architecture calls this form invalid and the assembler refuses
-	 * it, but the ch. 10 stwu page says the 601 "supports execution with
-	 * rA=0 as shown above" — so r0 IS updated, unlike the loads.
+	 * it.  The 601 "supports execution with rA=0 as shown above" (ch. 10
+	 * stwu page) — the store to (r0)+d happens — but §3.5.3 is specific
+	 * about the writeback: "To maintain compatibility with POWER in this
+	 * case, the 601 does not update register r0."  So r22 sees the data
+	 * and r21 sees the ORIGINAL r0, exactly as for the loads.
 	 *   0x94800004 = stwu r4,4(r0)  (opcode 37, rS = 4, rA = 0, d = 4) */
 	li	0, 0x4040
 	.long	0x94800004
-	mr	21, 0			/* 0x4044 if the update happened    */
-	lwz	22, 0x44(31)
+	mr	21, 0			/* still 0x4040: r0 is not updated   */
+	lwz	22, 0x44(31)		/* 0x11223344: the store happened    */
 
 	HALT(0)

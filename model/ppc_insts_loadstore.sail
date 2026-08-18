@@ -196,8 +196,10 @@ function mem_write_fp(ea, width, data) =
  *
  * The update forms read (rA), not (rA|0): rA = 0 is an invalid form for
  * them, and the ch. 10 pseudocode is written in terms of (rA) — which is
- * what makes the 601's documented rA = 0 store behaviour ("the 601 supports
- * execution with rA=0 as shown above", stwu page) well defined. */
+ * what makes the 601's documented rA = 0 execution ("the 601 supports
+ * execution with rA=0 as shown above", stwu page) well defined: the access
+ * goes to (r0) + d.  What that execution does NOT do is write r0 back; see
+ * exec_load and exec_store below. */
 
 val ea_d : (ridx, bits(16)) -> word
 function ea_d(rA, d) = gpr_or_zero(rA) + exts(d)
@@ -231,14 +233,37 @@ function exec_load(rD, rA, ea, width, sign, update) =
   }
 
 /* Store the low `width` bytes of rS, then (for the update forms) write the
- * effective address back to rA.  Unlike the loads there is no suppression:
- * the ch. 10 stbu/stwu pages say the 601 executes rA = 0 as written, so r0
- * is updated like any other register. */
+ * effective address back to rA.
+ *
+ * INVALID-FORM (§3.5.3): the architecture calls a store with update invalid
+ * when rA = 0, and the 601 defines what it does — "The PowerPC architecture
+ * defines store with update instructions with rA = 0 as an invalid form.  In
+ * the POWER architecture, this form is not considered invalid and in this
+ * case rA is not updated.  To maintain compatibility with POWER in this
+ * case, the 601 does not update register r0."  §3.5.2 says the identical
+ * thing about the loads, which is why exec_load above suppresses too.
+ *
+ * TWO PASSAGES, ONE READING: the ch. 10 stbu/stwu/sthu pages say only "while
+ * the PowerPC architecture defines the instruction form as invalid if rA=0,
+ * the 601 supports execution with rA=0 as shown above", whose pseudocode
+ * lists `rA <- EA` unconditionally.  That is the coarser statement — it is
+ * making the point that the instruction EXECUTES rather than trapping — and
+ * §3.5.3 is the one that spells out what happens to r0.  §3.5.8 settles it
+ * for the pair by saying both at once about the floating-point forms: "the
+ * 601 accesses memory for these cases but inhibits the update of the integer
+ * register r0".  So: the memory access happens, the writeback to r0 does
+ * not.  (This model previously followed the ch. 10 reading and updated r0.)
+ *
+ * Unlike the loads there is NO rA = rS suppression: §3.5.3's other rule is
+ * "if rS = rA, the contents of register rS are copied to the target memory
+ * element, then the generated EA is placed into rA" — the store happens
+ * first and the writeback still lands.  rA = rD is a load-only conflict,
+ * because only a load has two things to put in one register. */
 val exec_store : forall 'n, 'n in {1, 2, 4}.
   (ridx, ridx, word, int('n), bool) -> Completion
 function exec_store(rS, rA, ea, width, update) =
   if mem_write(ea, width, slice(GPR(rS), 0, 8 * width)) then {
-    if update then GPR(rA) = ea;
+    if update & (rA != 0b00000) then GPR(rA) = ea;
     COMPLETED
   } else EXCEPTION_TAKEN
 

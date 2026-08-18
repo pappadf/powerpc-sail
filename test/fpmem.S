@@ -17,8 +17,8 @@
  * Expected (hex): status 0x2A (the floating-point unavailable handler),
  *   r06=3FF80000 r07=0 r08=3FC00000 r09=3FF80000 r11=0 r13=36A00000 r14=0
  *   r12=1 r15=00000200 r16=BFF80000 r17=3FF80000 r18=BFF80000 r19=3FF80000
- *   r20=0 (a load with update and rA=0 does not update r0)
- *   r21=00000018 (a store with update and rA=0 does), r22=00004008,
+ *   r20=0, r21=0 (neither a load NOR a store with update and rA=0
+ *   updates r0 — §3.5.8), r22=00004008,
  *   SRR1 = 0x1040 — the saved MSR with the high half cleared (Table 5-19).
  */
 
@@ -84,13 +84,15 @@ _start:
 	lwz	19, 88(10)		/* 0x3FF80000                        */
 
 	/* --- update forms, including the two rA=0 invalid forms -------- */
-	/* A load with update and rA=0 loads but does not update r0, while a
-	 * store with update and rA=0 does update it — the same asymmetry the
-	 * integer forms have (ch. 10 lfsu and stfdu pages).  The assembler
-	 * refuses to encode either, so both go in as words.               */
+	/* §3.5.8 covers all eight floating-point update forms in one
+	 * sentence: with rA = 0 "the 601 accesses memory for these cases but
+	 * inhibits the update of the integer register r0".  So the load
+	 * loads, the store stores, and NEITHER writes r0 — there is no
+	 * load/store asymmetry here.  The assembler refuses to encode
+	 * either, so both go in as words.                                 */
 	.long	0xCD200008		/* lfdu f9,8(0): EA = 8, r0 kept     */
 	mr	20, 0
-	.long	0xDC200018		/* stfdu f1,0x18(0): r0 <- 0x18      */
+	.long	0xDC200018		/* stfdu f1,0x18(0): EA = 0x18, r0 kept */
 	mr	21, 0
 	li	22, 0x4000
 	lfdu	10, 8(22)		/* r22 <- 0x4008                     */

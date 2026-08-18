@@ -5,9 +5,12 @@
  * is zero), performs one operation, and records the result and the FPSCR.
  * The cases, in order:
  *
- *  a  overflow, disabled, round to nearest    -> +infinity, OX, XX and FI:
- *     the delivered result is not the value the operation produced, so it
- *     is inexact by construction (Tables 2-1/5-17 bit 14)
+ *  a  overflow, disabled, round to nearest    -> +infinity, OX and XX, but
+ *     FR and FI CLEARED: §5.4.7.4.1's action list for a disabled overflow
+ *     ends "FPSCR[FR FI] are cleared", and that per-condition list governs
+ *     over Tables 2-1/5-17's bit-14 gloss ("... or a disabled overflow
+ *     exception"), which reads the other way.  See fp_deliver in
+ *     model/ppc_insts_fp.sail for the full argument.
  *  b  overflow, disabled, round toward zero   -> the largest finite double
  *  c  overflow, ENABLED                       -> the rounded result with its
  *     exponent lowered by 1536 (§5.4.7.4.1), so the handler sees a number:
@@ -15,16 +18,18 @@
  *     0x1FFFFFFFFFFFFFFF
  *  d  underflow, disabled                     -> the smallest denormal times
  *     0.5 is an exact tie at half of it, so it rounds to +0 with UX and XX,
- *     and with FI: §5.4.7.5.1 does not clear FR/FI the way the invalid,
- *     zero-divide and disabled-overflow cases do, so §2.5.6's general
- *     "rounding occurred" rule stands
+ *     and with FI SET: §5.4.7.5.1's disabled-underflow action list is the
+ *     mirror image of the overflow one in case (a) — it names UX, the
+ *     target FPR and FPRF and says NOTHING about FR/FI — so §2.5.6's
+ *     general "rounding occurred" rule stands and the bits report the
+ *     rounding that actually happened.  The two cases really do differ.
  *  e  zero divide                             -> +infinity, ZX
  *  f  0/0                                     -> VXZDZ, and the generated
  *     QNaN 0x7FF8000000000000
  *  g  infinity - infinity with VE SET         -> suppressed: frD keeps the
  *     42.0 put there beforehand, and FPRF is left alone too
  *
- * Expected (hex): r04=7FF00000 r05=92025000 r06=7FEFFFFF r07=92024001
+ * Expected (hex): r04=7FF00000 r05=92005000 r06=7FEFFFFF r07=92004001
  *   r08=1FFFFFFF r09=FFFFFFFF r11=D0004040 r12=0 r13=0 r14=8A022000
  *   r15=7FF00000 r16=0 r17=84005000 r18=7FF80000 r19=0 r20=A0211000
  *   r21=40450000 r22=0 r23=E0800080.

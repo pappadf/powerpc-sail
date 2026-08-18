@@ -110,6 +110,24 @@ function fp_unpack(v) = {
  * nothing else (§2.5.2.7, Figure 2-49). */
 let fp_default_qnan : bits(64) = 0x7FF8000000000000
 
+/* The value to pass for an operand slot the instruction DOES NOT HAVE.
+ *
+ * §2.5.2.7's propagation rule is conditional on the operand existing: "if the
+ * operand specified by frB is a NaN (IF THE INSTRUCTION SPECIFIES AN FRB
+ * OPERAND), that NaN is stored as the result.  Otherwise, if the operand
+ * specified by frC is a NaN (IF THE INSTRUCTION SPECIFIES AN FRC
+ * OPERAND) ...", so a slot the instruction does not have must be SKIPPED,
+ * not filled in — an absent frB must not shadow a real frC.
+ *
+ * Positive zero is the placeholder because the property that matters is
+ * structural: fp_kind classifies it FK_Zero, so it can never be a NaN and
+ * can never be an SNaN, whatever slot it is passed in.  fp_default_qnan
+ * cannot be used for this — it IS a NaN, so in a middle slot it wins the
+ * propagation test ahead of a real operand behind it.  That is exactly what
+ * fp_mul_eval used to do, and frC's NaN was unreachable through fmul as a
+ * result. */
+let fp_absent_operand : bits(64) = 0x0000000000000000
+
 /* Quieten a NaN operand that is being propagated: set the high-order
  * fraction bit, keeping everything else — which is how "specific encodings
  * in QNaNs can be preserved through a sequence of operations" (§2.5.2.7). */
@@ -271,8 +289,9 @@ let fpscr_bit_vximz  : bits(32) = 0x00100000   /* manual bit 11 */
 
 /* NaN propagation (§2.5.2.7): the result is frA's NaN if it has one, else
  * frB's, else frC's, else the generated QNaN.  Callers pass the operands in
- * that order, using a non-NaN placeholder for the ones an instruction does
- * not have. */
+ * the architectural slot order and MUST pass fp_absent_operand — which is
+ * definitionally not a NaN — for a slot the instruction does not have; see
+ * its definition above for why nothing NaN-shaped will do. */
 val fp_propagate_nan : (bits(64), bits(64), bits(64)) -> bits(64)
 function fp_propagate_nan(a, b, c) =
   if fp_is_nan(a) then fp_quieten(a)
@@ -281,7 +300,8 @@ function fp_propagate_nan(a, b, c) =
   else fp_default_qnan
 
 /* Does any operand signal?  An SNaN operand is an invalid operation for
- * every arithmetic instruction (§5.4.7.2). */
+ * every arithmetic instruction (§5.4.7.2).  Absent slots take
+ * fp_absent_operand here too, for the same reason. */
 val fp_any_snan : (bits(64), bits(64), bits(64)) -> bool
 function fp_any_snan(a, b, c) =
   match (fp_kind(a), fp_kind(b), fp_kind(c)) {
@@ -306,7 +326,7 @@ val fp_add_eval : (bits(64), bits(64), bits(2)) -> FpEval
 function fp_add_eval(a, b, rn) = {
   let ka = fp_kind(a);
   let kb = fp_kind(b);
-  if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_default_qnan)
+  if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_absent_operand)
   else match (ka, kb) {
     /* Magnitude subtraction of infinities is the ∞-∞ invalid operation. */
     (FK_Inf, FK_Inf) =>
@@ -341,7 +361,11 @@ function fp_add_eval(a, b, rn) = {
 val fp_mul_eval : (bits(64), bits(64)) -> FpEval
 function fp_mul_eval(a, c) = {
   let sign = xor_vec(fp_sign(a), fp_sign(c));
-  if fp_is_nan(a) | fp_is_nan(c) then fp_nan_result(a, fp_default_qnan, c)
+  /* fmul has NO frB operand — the field is reserved — so the middle slot is
+   * absent and §2.5.2.7 skips it, letting frC's NaN through.  Passing
+   * fp_default_qnan here (as this model used to) made the frB test succeed
+   * every time and substituted the default QNaN for frC's payload. */
+  if fp_is_nan(a) | fp_is_nan(c) then fp_nan_result(a, fp_absent_operand, c)
   else match (fp_kind(a), fp_kind(c)) {
     /* Multiplication of infinity by zero, in either order (§5.4.7.2). */
     (FK_Inf, FK_Zero) => Ev_Invalid(fpscr_bit_vximz, fp_default_qnan),
@@ -366,7 +390,7 @@ function fp_mul_eval(a, c) = {
 val fp_div_eval : (bits(64), bits(64), bool) -> FpEval
 function fp_div_eval(a, b, single) = {
   let sign = xor_vec(fp_sign(a), fp_sign(b));
-  if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_default_qnan)
+  if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_absent_operand)
   else match (fp_kind(a), fp_kind(b)) {
     (FK_Inf, FK_Inf)   => Ev_Invalid(fpscr_bit_vxidi, fp_default_qnan),
     (FK_Zero, FK_Zero) => Ev_Invalid(fpscr_bit_vxzdz, fp_default_qnan),

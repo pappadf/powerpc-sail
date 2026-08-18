@@ -227,9 +227,17 @@ function fp_double_to_single(v) = {
 /* Load `width` bytes into frD, converting from single format if width is 4,
  * then (for the update forms) write the effective address back to rA.
  *
- * INVALID-FORM (ch. 10 lfsu page): "if operand rA = 0 the 601 does not
- * update register r0" — the same asymmetry the integer loads and stores
- * have, and stated just as explicitly. */
+ * INVALID-FORM (§3.5.8): "The PowerPC architecture defines floating-point
+ * load and store with update instructions (lfsu, lfsux, lfdu, lfdux, stfsu,
+ * stfsux, stfdu, stfdux) with operand rA = 0 as invalid forms ... To
+ * maintain compatibility with the POWER architecture, the 601 accesses
+ * memory for these cases but inhibits the update of the integer register
+ * r0."  One sentence covering all eight, loads and stores alike — so
+ * exec_fp_store below suppresses on exactly the same condition.
+ *
+ * There is no rA = frD conflict to worry about: the loaded value goes to an
+ * FPR and the effective address to a GPR, so the two writebacks can never
+ * collide the way they do for an integer load with update. */
 val exec_fp_load : forall 'n, 'n in {4, 8}.
   (fridx, ridx, word, int('n), bool) -> Completion
 function exec_fp_load(frD, rA, ea, width, update) =
@@ -243,16 +251,23 @@ function exec_fp_load(frD, rA, ea, width, update) =
     None() => EXCEPTION_TAKEN
   }
 
-/* Store frS, converting to single format if width is 4.  As for the integer
- * stores, rA = 0 executes as written and r0 IS updated (ch. 10 stfdu page:
- * "the 601 supports execution with rA=0 as shown above"). */
+/* Store frS, converting to single format if width is 4.
+ *
+ * INVALID-FORM (§3.5.8, quoted above exec_fp_load): stfsu, stfsux, stfdu and
+ * stfdux with rA = 0 "access memory ... but inhibit the update of the
+ * integer register r0" — the manual names the stores in the same breath as
+ * the loads, so the suppression is identical.  Table 3-23's per-instruction
+ * column says flatly "the EA is placed into the register specified by
+ * operand rA", but that is the summary table describing the ordinary case;
+ * §3.5.8 is the paragraph written specifically about rA = 0 and governs.
+ * (This model previously followed the table and updated r0.) */
 val exec_fp_store : forall 'n, 'n in {4, 8}.
   (fridx, ridx, word, int('n), bool) -> Completion
 function exec_fp_store(frS, rA, ea, width, update) = {
   let data : bits(64) = if width == 4 then sail_zero_extend(fp_double_to_single(FPR(frS)), 64)
                         else FPR(frS);
   if mem_write_fp(ea, width, slice(data, 0, 8 * width)) then {
-    if update then GPR(rA) = ea;
+    if update & (rA != 0b00000) then GPR(rA) = ea;
     COMPLETED
   } else EXCEPTION_TAKEN
 }
@@ -505,22 +520,37 @@ function fp_deliver(frD, ev, single, rc) = {
           value = fp_pack(r.sign, r.sig, r.exp - fp_scale_bias(single));
           if r.inexact then mask = mask | fpscr_bit_xx
         } else {
-          /* Disabled: the result is clamped, and is inexact by construction —
-           * it is not the value the operation produced.  FI says so and FR
-           * is cleared, there being no "incremented fraction" in a result
-           * that was replaced wholesale.
+          /* Disabled: the result is replaced wholesale by an infinity or the
+           * format's largest finite, and XX is raised because §5.4.7.6 makes
+           * "the rounded result overflows and overflow exception condition is
+           * disabled" an inexact condition in its own right.
            *
-           * The manual states this twice and differently: Tables 2-1 and
-           * 5-17 define FI as set by "an inexact fraction OR A DISABLED
-           * EXPONENT OVERFLOW", while §5.4.7.4.1's action list says FR and
-           * FI are both cleared.  The bit definition wins — it is the
-           * normative statement of what FI means, its carve-out would be
-           * pointless if the action list governed, and §5.4.7.4.1 sets the
-           * sticky XX in the same breath as clearing the non-sticky FI,
-           * which cannot both describe the same result. */
+           * TWO PASSAGES DISAGREE ABOUT FR AND FI, AND THE ACTION LIST WINS.
+           * Table 2-1 (and Table 5-17) summarize bit 14 as "the last
+           * floating-point instruction that potentially rounded the
+           * intermediate result produced an inexact fraction OR A DISABLED
+           * OVERFLOW EXCEPTION", which reads as FI = 1.  But §5.4.7.4.1's
+           * list of the actions taken "when the overflow exception condition
+           * is disabled (FPSCR[OE] = 0) and an overflow condition occurs"
+           * ends: "The result is placed into the target FPR / FPSCR[FR FI]
+           * ARE CLEARED / FPSCR[FPRF] is set to indicate the class and sign
+           * of the result."  That list is the specific, per-condition
+           * statement of what this exact case does, and it is unambiguous;
+           * the table entry is a one-line gloss on what a bit means across
+           * all cases.  The specific governs, so both bits are cleared.
+           *
+           * §2.5.6 agrees with the action list in spirit: FR and FI describe
+           * ROUNDING ("whether rounding occurs (FI) and whether the fraction
+           * was incremented (FR)"), and no rounding produced this value —
+           * it was substituted after the fact.  XX, which is sticky and is
+           * about the exception condition rather than the rounding, still
+           * goes up.
+           *
+           * The model used to set FI = 1 here, following Table 2-1.  Do not
+           * revert without re-reading §5.4.7.4.1 (MPC601UM p. 5-40/5-41). */
           mask = mask | fpscr_bit_xx;
           fr = false;
-          fi = true;
+          fi = false;
           value = fp_overflow_result(r.sign, rn, single)
         }
       } else if r.tiny & (r.inexact | (FPSCR[UE] == 0b1)) then {
@@ -536,6 +566,17 @@ function fp_deliver(frD, ev, single, rc) = {
           fi = ru.inexact;
           if ru.inexact then mask = mask | fpscr_bit_xx
         } else
+          /* Disabled: §5.4.7.5.1's action list for "when the underflow
+           * exception condition is disabled (FPSCR[UE]=0)" is only three
+           * items — UX is set, "the rounded result is placed into the target
+           * FPR", and FPRF is set — and says NOTHING about FR and FI.  So
+           * unlike the disabled-overflow case above there is no instruction
+           * to clear them, and §2.5.6's general rule stands: the value
+           * delivered IS the rounded result, so FR and FI report that
+           * rounding, which is what fr/fi already hold from fp_round.  The
+           * asymmetry is deliberate on the manual's part and is why the two
+           * paths are commented separately: an overflow substitutes a value
+           * that no rounding produced, an underflow does not. */
           mask = mask | fpscr_bit_xx
       } else if r.inexact then
         mask = fpscr_bit_xx;
@@ -593,7 +634,7 @@ function clause execute(FSUB(frD, frA, frB, single, rc)) =
   else {
     let a = FPR(frA);
     let b = FPR(frB);
-    let ev = if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_default_qnan)
+    let ev = if fp_is_nan(a) | fp_is_nan(b) then fp_nan_result(a, b, fp_absent_operand)
              else fp_add_eval(a, xor_vec(b, 0x8000000000000000), FPSCR[RN]);
     fp_deliver(frD, ev, single, rc)
   }
@@ -709,7 +750,7 @@ function clause execute(FRSP(frD, frB, rc)) =
   if fp_unavailable() then fp_unavailable_exception()
   else {
     let b = FPR(frB);
-    let ev = if fp_is_nan(b) then fp_nan_result(b, fp_default_qnan, fp_default_qnan)
+    let ev = if fp_is_nan(b) then fp_nan_result(fp_absent_operand, b, fp_absent_operand)
              else if fp_is_inf(b) then Ev_Inf(fp_sign(b))
              else if fp_is_zero(b) then Ev_Zero(fp_sign(b))
              else {
@@ -739,7 +780,7 @@ function exec_fctiw(frD, frB, rn, rc) = {
   let r = fp_to_int32(b, rn);
   let mask : word =
     if r.invalid then
-      0x00000100 | (if fp_any_snan(b, fp_default_qnan, fp_default_qnan)
+      0x00000100 | (if fp_any_snan(fp_absent_operand, b, fp_absent_operand)
                     then fpscr_bit_vxsnan else zeros(32))   /* VXCVI, manual 23 */
     else if r.inexact then fpscr_bit_xx
     else zeros(32);
@@ -795,7 +836,7 @@ function exec_fcmp(crfd, frA, frB, ordered) = {
   CRfield(unsigned(crfd), c);
   harness_note_write(hw_fpscr, hw_fpscr_fpcc);
   FPSCR[FPCC] = c;
-  let snan = fp_any_snan(a, b, fp_default_qnan);
+  let snan = fp_any_snan(a, b, fp_absent_operand);
   let nan = fp_is_nan(a) | fp_is_nan(b);
   let raise : word =
     if not_bool(ordered) then (if snan then fpscr_bit_vxsnan else zeros(32))
