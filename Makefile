@@ -46,11 +46,11 @@ endif
 SAIL_SRCS := \
 	$(MODEL)/prelude.sail \
 	$(MODEL)/ppc_types.sail \
+	$(MODEL)/ppc_harness.sail \
 	$(MODEL)/ppc_core_iface.sail \
 	$(MODEL)/ppc_regs.sail \
 	$(CORE_DIR)/$(CORE)_regs.sail \
 	$(MODEL)/ppc_debug.sail \
-	$(MODEL)/ppc_harness.sail \
 	$(MODEL)/ppc_softfloat.sail \
 	$(MODEL)/ppc_mem.sail \
 	$(MODEL)/ppc_mmu.sail \

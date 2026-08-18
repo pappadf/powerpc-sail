@@ -57,7 +57,9 @@ let fpscr_invalid_bits : word = 0x01F80100
 val fpscr_update_summary : unit -> unit
 function fpscr_update_summary() = {
   let vx = (FPSCR.bits & fpscr_invalid_bits) != zeros(32);
+  harness_note_write(hw_fpscr, hw_fpscr_vx);
   FPSCR[VX] = bool_to_bits(vx);
+  harness_note_write(hw_fpscr, hw_fpscr_fex);
   FPSCR[FEX] = bool_to_bits(
     (vx & (FPSCR[VE] == 0b1))
     | ((FPSCR[OX] == 0b1) & (FPSCR[OE] == 0b1))
@@ -75,8 +77,12 @@ val fpscr_raise : word -> unit
 function fpscr_raise(m) = {
   let raised = m & fpscr_implemented;
   let newly = raised & not_vec(FPSCR.bits) & fpscr_exception_bits;
+  harness_wrote(hw_fpscr);
   FPSCR = Mk_Fpscr(FPSCR.bits | raised);
-  if newly != zeros(32) then FPSCR[FX] = 0b1;
+  if newly != zeros(32) then {
+    harness_note_write(hw_fpscr, hw_fpscr_fx);
+    FPSCR[FX] = 0b1
+  };
   fpscr_update_summary()
 }
 
@@ -84,13 +90,16 @@ function fpscr_raise(m) = {
  * included, and only the two derived bits are recomputed (§3.4.5). */
 val fpscr_write : word -> unit
 function fpscr_write(v) = {
+  harness_wrote(hw_fpscr);
   FPSCR = Mk_Fpscr(v & fpscr_implemented);
   fpscr_update_summary()
 }
 
 val fpscr_set_fr_fi : (bool, bool) -> unit
 function fpscr_set_fr_fi(fr, fi) = {
+  harness_note_write(hw_fpscr, hw_fpscr_fr);
   FPSCR[FR] = bool_to_bits(fr);
+  harness_note_write(hw_fpscr, hw_fpscr_fi);
   FPSCR[FI] = bool_to_bits(fi)
 }
 
@@ -112,7 +121,10 @@ function fp_class_fprf(v) = {
 }
 
 val fpscr_set_fprf : bits(64) -> unit
-function fpscr_set_fprf(v) = { FPSCR[FPRF] = fp_class_fprf(v) }
+function fpscr_set_fprf(v) = {
+  harness_note_write(hw_fpscr, hw_fpscr_fprf);
+  FPSCR[FPRF] = fp_class_fprf(v)
+}
 
 /* --- The three wrappers every floating-point instruction uses ----------- */
 
@@ -781,6 +793,7 @@ function exec_fcmp(crfd, frA, frB, ordered) = {
   let b = FPR(frB);
   let c = fp_compare(a, b);
   CRfield(unsigned(crfd), c);
+  harness_note_write(hw_fpscr, hw_fpscr_fpcc);
   FPSCR[FPCC] = c;
   let snan = fp_any_snan(a, b, fp_default_qnan);
   let nan = fp_is_nan(a) | fp_is_nan(b);

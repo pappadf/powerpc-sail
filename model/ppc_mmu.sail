@@ -113,7 +113,7 @@ function pteg_search(base, h, vsid, api) = {
   foreach (i from 0 to 7) {
     if not_bool(hit) then {
       let addr = base + (8 * i);
-      let pte0 = Mk_Pte0(phys_read(addr, 4));
+      let pte0 = Mk_Pte0(phys_read_pte(addr));
       if (pte0[V] == 0b1) & (pte0[H] == h) & (pte0[VSID] == vsid)
          & (pte0[API] == api) then {
         hit = true;
@@ -143,7 +143,7 @@ function page_translate(sr, ea, acc) = {
   match found {
     None() => TR_Fault(Fault_PageFault),
     Some(pte_addr) => {
-      let pte1 = Mk_Pte1(phys_read(pte_addr + 4, 4));
+      let pte1 = Mk_Pte1(phys_read_pte(pte_addr + 4));
       let ok = protection_ok(segment_key(sr), pte1[PP], acc);
       /* Page history recording (§6.8.4).  R is set on every
        * reference, including one the protection mechanism goes on to reject
@@ -154,7 +154,7 @@ function page_translate(sr, ea, acc) = {
       let hist : Pte1 = [pte1 with R = 0b1,
                               C = if ok & is_store_access(acc) then 0b1
                                   else pte1[C]];
-      if hist.bits != pte1.bits then phys_write(pte_addr + 4, 4, hist.bits);
+      if hist.bits != pte1.bits then phys_write_pte(pte_addr + 4, hist.bits);
       if ok then TR_Address(pte1[PPN] @ ea[11 .. 0], pte1[WIM])
       else TR_Fault(Fault_Protection)
     }

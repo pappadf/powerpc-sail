@@ -160,8 +160,10 @@ S msr 0x00000000
 S srr0 0x00100004
 S srr1 0x00020000
 FW nia
+FW msr
 FW srr0
 FW srr1
+FW reservation
 FF 0x00100000 4
 EXC 0x00000C00
 DONE
@@ -197,9 +199,12 @@ S srr0 0x00100000
 S dar 0x0FFFFFFE
 S dsisr 0x000000C3
 FW nia
+FW msr
 FW srr0
+FW srr1
 FW dar
 FW dsisr
+FW reservation
 FF 0x00100000 4
 EXC 0x00000600
 DONE
@@ -332,7 +337,10 @@ EXC none
 DONE
 S fpr1 0x0000000000000000
 FW nia
+FW msr
 FW srr0
+FW srr1
+FW reservation
 FF 0x00100000 4
 EXC 0x00000800
 DONE
@@ -450,6 +458,7 @@ FW nia
 FW msr
 FW srr0
 FW srr1
+FW reservation
 FF 0x00000500 4
 EXC 0x00000500
 DONE
@@ -659,6 +668,181 @@ FF 0x00100004 4
 EXC none
 EOF
 check opcode-placement-little-endian '^(S gpr5|FF|EXC)'
+
+# ---------------------------------------------------------------------------
+# 14. The write-set is a WRITE-set, not a change-set.
+#     `crand 0x1c,0x1d,0x1c` computes CR[28] = CR[29] & CR[28], writing a bit
+#     inside the field it reads, so all-zeros and all-ones are BOTH fixed
+#     points: no choice of input makes the write change a value.  The old
+#     snapshot-and-diff write-set therefore missed it entirely and the vector
+#     said "cr7 unchanged" about a field the instruction rewrites — a miss in
+#     the dangerous direction.  Both runs must now report FW cr7.
+#     The model tells the harness what it wrote (harness_note_write,
+#     model/ppc_harness.sail); the diff is kept only as a cross-check, and
+#     any disagreement comes out as ERR write-tracking-gap.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+OPCODE 0x4F9DE202
+STEP
+RESET
+SET cia 0x00100000
+SET cr7 0xF
+OPCODE 0x4F9DE202
+STEP
+QUIT
+---
+S cr7 0x0
+FW cr7
+FW nia
+DONE
+S cr7 0xF
+FW cr7
+FW nia
+DONE
+EOF
+check "write-set-fixed-point" '^S cr7 |^(FW|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 14b. The same property for a whole register and for a sub-field: `or r3,r3,r3`
+#     (the canonical register move to itself) writes gpr3 with the value it
+#     already held, and `addic r4,r3,0` with r3 = 0 writes XER[CA] with the 0
+#     already there.  Neither changes a bit; both must appear.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET gpr3 0xA5A5A5A5
+OPCODE 0x7C631B78
+STEP
+RESET
+SET cia 0x00100000
+OPCODE 0x30830000
+STEP
+QUIT
+---
+FW gpr3
+FW nia
+DONE
+FW gpr4
+FW xer.ca
+FW nia
+DONE
+EOF
+check "write-set-no-change" '^(FW|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 15. Page-table-walk traffic is reported apart from the instruction's own.
+#     With MSR[DT] = 1 a load drags a walk behind it: the PTEG search reads
+#     PTE word 0, the hit reads word 1, and the reference bit is written back
+#     (§6.8.4, §6.9.2).  Those are the MMU's accesses, not the instruction's,
+#     and they come out as FTR/FTW so a caller can attribute them correctly —
+#     previously they were indistinguishable from the load's own FMR.
+#
+#     SDR1 = 0x00200000 (HTABORG = 0x0020, HTABMASK = 0) puts the table at
+#     0x0020_0000; SR0 = 0 gives VSID 0, so EA 0x0010_0000 hashes to PTEG
+#     0x0020_4000.  The PTE maps it to physical 0x0030_0000 with PP = 10
+#     (read/write) and R and C clear, so the walk has a writeback to do.
+#     Instruction translation stays off, so the fetch is direct.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET msr 0x00000010
+SET sdr1 0x00200000
+SET gpr3 0x00100000
+MEM 0x00204000 8000000000300002
+MEM 0x00300000 DEADBEEF
+OPCODE 0x80C30000
+STEP
+QUIT
+---
+S gpr6 0xDEADBEEF
+M 0x00204006 01
+FW gpr6
+FW nia
+FMR 0x00300000 4
+FF 0x00100000 4
+FTR 0x00204000 4
+FTR 0x00204004 4
+FTW 0x00204004 4
+EXC none
+DONE
+EOF
+check "mmu-walk-data" '^S gpr6 |^(FW|FMR|FMW|FF|FTR|FTW|M |EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 15b. The fetch side of the same gap.  With MSR[IT] = 1 the walk that
+#      translates the fetch used to land in FMR, so an instruction that touched
+#      no data at all appeared to have read memory.  The fetch itself is FF at
+#      the PHYSICAL address; the walk is FTR/FTW.
+#      The opcode goes in with MEM, not OPCODE: OPCODE writes at NIA, which is
+#      an effective address once instruction translation is on.
+# ---------------------------------------------------------------------------
+cat > "$TMP/case" <<'EOF'
+RESET
+SET cia 0x00100000
+SET msr 0x00000020
+SET sdr1 0x00200000
+MEM 0x00204000 8000000000300002
+MEM 0x00300000 38600005
+STEP
+QUIT
+---
+S gpr3 0x00000005
+FW gpr3
+FW nia
+FF 0x00300000 4
+FTR 0x00204000 4
+FTR 0x00204004 4
+FTW 0x00204004 4
+EXC none
+DONE
+EOF
+check "mmu-walk-fetch" '^S gpr3 |^(FW|FMR|FMW|FF|FTR|FTW|EXC|ERR|DONE)'
+
+# ---------------------------------------------------------------------------
+# 16. Memory tracking survives a full memory window.
+#     RESET clears memory by replaying the bytes written since the last one,
+#     and the table that remembers them held exactly 65536 — the size of the
+#     vector format's 64 KiB window.  A vector that populated its whole window
+#     and then touched one byte outside it overflowed, and every step after
+#     that reported ERR memory-tracking-overflow, which a caller can only read
+#     as "discard this vector".  The table now grows, so the same batch is
+#     clean, and the RESET in the middle must still leave nothing behind.
+# ---------------------------------------------------------------------------
+{
+  echo "RESET"
+  echo "SET cia 0x00100000"
+  echo "SET gpr3 0x00200000"
+  echo "SET gpr5 0x12345678"
+  # 256 lines of 256 bytes = the whole 64 KiB window.  1048576 = 0x0010_0000;
+  # `sh` has no hex literals in arithmetic, so the base address is decimal.
+  row=''
+  j=0
+  while [ "$j" -lt 32 ]; do row="${row}A5A5A5A5A5A5A5A5"; j=$((j + 1)); done
+  i=0
+  while [ "$i" -lt 256 ]; do
+    printf 'MEM 0x%08X %s\n' "$(( 1048576 + i * 256 ))" "$row"
+    i=$((i + 1))
+  done
+  echo "OPCODE 0x90A30000"
+  echo "STEP"
+  # RESET must undo all 64 KiB + the store, so a plain load reads back zero.
+  echo "RESET"
+  echo "SET cia 0x00100000"
+  echo "SET gpr3 0x00100000"
+  echo "OPCODE 0x80C30010"
+  echo "STEP"
+  echo "QUIT"
+} > "$TMP/case.cmds"
+{
+  cat "$TMP/case.cmds"
+  echo "---"
+  printf 'S gpr6 0x00000000\nM 0x00200000 12345678\nFMW 0x00200000 4\nDONE\nS gpr6 0x00000000\nFMR 0x00100010 4\nDONE\n'
+} > "$TMP/case"
+check "memory-tracking-full-window" '^S gpr6 |^(FMR|FMW|M |ERR|DONE)'
 
 echo "$pass/$((pass + fail)) harness tests passed"
 [ "$fail" -eq 0 ]

@@ -571,7 +571,10 @@ function clause execute(LMW(rD, rA, d)) = {
           /* INVALID-FORM (ch. 10 lmw page): a base register inside the
            * loaded range is skipped, so it survives the whole transfer —
            * but rA = 0 is not used for addressing, so r0 is loaded. */
-          if (rA == 0b00000) | (unsigned(rA) != r) then { GPRs[r] = v }
+          if (rA == 0b00000) | (unsigned(rA) != r) then {
+            harness_wrote(hw_gpr0 + get_slice_int(8, r, 0));
+            GPRs[r] = v
+          }
         },
         None() => { ok = false }
       }
@@ -647,7 +650,10 @@ function exec_load_string(rD, base, n, inhibit) = {
         }
       }
     };
-    if used & (inhibit[r] == bitzero) then { GPRs[r] = acc }
+    if used & (inhibit[r] == bitzero) then {
+      harness_wrote(hw_gpr0 + get_slice_int(8, r, 0));
+      GPRs[r] = acc
+    }
   };
   if ok then COMPLETED else EXCEPTION_TAKEN
 }

@@ -116,6 +116,7 @@ mapping clause encdec =
 
 function clause execute(MCRXR(crfd)) = {
   CRfield(unsigned(crfd), XER.bits[31 .. 28]);
+  harness_wrote(hw_xer);
   XER = Mk_Xer(XER.bits & 0x0FFFFFFF);
   COMPLETED
 }
@@ -170,6 +171,7 @@ function clause execute(RFI()) =
   if in_user_mode() then program_exception(Prog_Privileged)
   else {
     write_msr(MSR.bits[31 .. 16] @ SRR1[15 .. 0]);
+    harness_wrote(hw_nia);
     NIA = SRR0 & 0xFFFFFFFC;
     COMPLETED
   }
@@ -279,7 +281,9 @@ function clause execute(TLBIE(_rB)) =
 
 val external_control_fault : word -> Completion
 function external_control_fault(ea) = {
+  harness_wrote(hw_dar);
   DAR = ea;
+  harness_wrote(hw_dsisr);
   DSISR = 0x00100000;   /* manual bit 11: eciwx/ecowx with EAR[E]=0 */
   data_access_exception()
 }
@@ -344,7 +348,7 @@ function clause execute(SC(lo)) = {
     request_halt(GPR(0b00011));
     COMPLETED
   } else {
-    if lo[0] == bitone then LR = CIA + 4;   /* 601: sc with LK=1 links */
+    if lo[0] == bitone then { harness_wrote(hw_lr); LR = CIA + 4 };   /* 601: sc with LK=1 links */
     take_exception(E_SystemCall, CIA + 4, lo);
     EXCEPTION_TAKEN   /* the sc itself completed, but control transferred */
   }

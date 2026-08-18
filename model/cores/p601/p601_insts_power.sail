@@ -42,8 +42,9 @@ function clause execute(P601_ABS(rD, rA, oe, rc)) = {
   let res = if signed(a) < 0 then (zeros(32) - a) else a;
   if oe == 0b1 then {
     let ov = a == 0x80000000;
+    harness_note_write(hw_xer, hw_xer_ov);
     XER[OV] = bool_to_bits(ov);
-    if ov then XER[SO] = 0b1
+    if ov then { harness_note_write(hw_xer, hw_xer_so); XER[SO] = 0b1 }
   };
   GPR(rD) = res;
   if rc == 0b1 then set_cr0(res);
@@ -127,9 +128,11 @@ function clause execute(P601_MUL(rD, rA, rB, oe, rc)) = {
   let prod = signed(GPR(rA)) * signed(GPR(rB));
   let ov = bool_to_bits((prod < -2147483648) | (prod > 2147483647));
   if oe == 0b1 then {
+    harness_note_write(hw_xer, hw_xer_ov);
     XER[OV] = ov;
-    if ov == 0b1 then XER[SO] = 0b1
+    if ov == 0b1 then { harness_note_write(hw_xer, hw_xer_so); XER[SO] = 0b1 }
   };
+  harness_wrote(hw_mq);
   MQ = get_slice_int(32, prod, 0);
   GPR(rD) = get_slice_int(32, prod, 32);
   if rc == 0b1 then set_cr0(MQ);
@@ -163,15 +166,18 @@ function exec_pwr_divide(rD, dividend, b, oe, rc) = {
     if (q >= -2147483648) & (q <= 2147483647) then {
       ov = false;
       GPR(rD) = get_slice_int(32, q, 0);
+      harness_wrote(hw_mq);
       MQ = get_slice_int(32, tmod_int(dividend, divisor), 0)
     } else if (dividend == -2147483648) & (divisor == -1) then {
       GPR(rD) = 0x80000000;
+      harness_wrote(hw_mq);
       MQ = zeros(32)
     }
   };
   if oe == 0b1 then {
+    harness_note_write(hw_xer, hw_xer_ov);
     XER[OV] = bool_to_bits(ov);
-    if ov then XER[SO] = 0b1
+    if ov then { harness_note_write(hw_xer, hw_xer_so); XER[SO] = 0b1 }
   };
   if rc == 0b1 then set_cr0(MQ);
   COMPLETED
@@ -304,6 +310,7 @@ function ROTR(x, n) = slice(x @ x, n, 32)
 
 val pwr_shift_and : (ridx, word, word, bits(1)) -> Completion
 function pwr_shift_and(rA, r, m, rc) = {
+  harness_wrote(hw_mq);
   MQ = r;
   logical_result(rA, r & m, rc)
 }
@@ -311,6 +318,7 @@ function pwr_shift_and(rA, r, m, rc) = {
 val pwr_shift_merge : (ridx, word, word, bits(1)) -> Completion
 function pwr_shift_merge(rA, r, m, rc) = {
   let res = (r & m) | (MQ & not_vec(m));
+  harness_wrote(hw_mq);
   MQ = r;
   logical_result(rA, res, rc)
 }
@@ -332,7 +340,9 @@ val pwr_shift_alg : (ridx, word, word, word, bits(1)) -> Completion
 function pwr_shift_alg(rA, s, r, m, rc) = {
   let neg = s[31] == bitone;
   let sign = if neg then ones(32) else zeros(32);
+  harness_note_write(hw_xer, hw_xer_ca);
   XER[CA] = bool_to_bits(neg & ((r & not_vec(m)) != zeros(32)));
+  harness_wrote(hw_mq);
   MQ = r;
   logical_result(rA, (r & m) | (sign & not_vec(m)), rc)
 }
@@ -615,10 +625,16 @@ function clause execute(P601_LSCBX(rD, rA, rB, rc)) = {
           }
         }
       };
-      if used & (inhibit[r] == bitzero) then { GPRs[r] = acc }
+      if used & (inhibit[r] == bitzero) then {
+        harness_wrote(hw_gpr0 + get_slice_int(8, r, 0));
+        GPRs[r] = acc
+      }
     };
     if ok then {
-      if matched then XER[BC] = get_slice_int(7, loaded, 0);
+      if matched then {
+        harness_note_write(hw_xer, hw_xer_bc);
+        XER[BC] = get_slice_int(7, loaded, 0)
+      };
       if rc == 0b1 then CRfield(0, 0b00 @ bool_to_bits(matched) @ XER[SO]);
       COMPLETED
     } else EXCEPTION_TAKEN

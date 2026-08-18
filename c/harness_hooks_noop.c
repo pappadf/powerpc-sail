@@ -28,3 +28,10 @@ unit harness_note_exception(const fbits vector)
   (void)vector;
   return UNIT;
 }
+
+unit harness_note_write(const fbits reg, const fbits mask)
+{
+  (void)reg;
+  (void)mask;
+  return UNIT;
+}

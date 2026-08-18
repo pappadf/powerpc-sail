@@ -14,10 +14,11 @@
  *
  * It is a C driver rather than Sail code because `sail -c` emits every
  * register as a plain C global and step() as a plain C function, so the whole
- * register write-set falls out of snapshotting the globals either side of a
- * step() call — exactly, with no model change at all.  Only the two things
- * that leave no trace in the final state need help from the model, and those
- * are the four one-line hooks of model/ppc_harness.sail.
+ * architected state can be read straight out of the globals with no model
+ * change at all.  What the state cannot show is what the step DID: which
+ * addresses it touched, whether it took an exception, and which registers it
+ * wrote as opposed to which ones changed value.  Those come from the
+ * observation hooks of model/ppc_harness.sail.
  *
  * PROTOCOL.  Line-oriented text on stdin, line-oriented text on stdout, many
  * vectors per process (starting a process per vector is far too slow for the
@@ -44,6 +45,8 @@
  *   FMR <addr> <width>     every data read, width in bytes
  *   FMW <addr> <width>     every data write
  *   FF <addr> <width>      every instruction fetch
+ *   FTR <addr> <width>     every page-table-walk read
+ *   FTW <addr> <width>     every page-table-walk write (the R/C bits)
  *   EXC none | EXC <hex>   the vector of the exception taken, if any
  *   HALT <hex>             only if the step hit the emulator's halt convention
  *   DONE
@@ -455,6 +458,103 @@ static const elem_t *find_elem(const char *nm)
 }
 
 /* ======================================================================= */
+/* Register id -> element mapping                                           */
+/* ======================================================================= */
+
+/* The model's write hook names a register by id (model/ppc_harness.sail); the
+ * response names a state element.  The two vocabularies differ only where an
+ * element is a FIELD of a register — CR0..CR7 inside CR, xer.ca inside XER,
+ * the FPSCR flags — so the mapping is "this id starts at this element, and
+ * covers this many".  The count is derived from the element table rather than
+ * written down, by taking the run of elements sharing the register's backing
+ * word: add a field to XER and the mapping follows on its own.
+ *
+ * Built by name so that a mismatch between the id list and the element table
+ * is a startup failure, not a wrong write-set. */
+
+static int16_t hw_first[HW_ID_COUNT];
+static uint8_t hw_count[HW_ID_COUNT];
+
+static int elem_index(const char *nm)
+{
+  const elem_t *e = find_elem(nm);
+  if (!e || e < elems || e >= elems + n_elems) {
+    fprintf(stderr, "harness: no state element named %s\n", nm);
+    exit(1);
+  }
+  return (int)(e - elems);
+}
+
+static void map_hw(int id, const char *first_name)
+{
+  int i = elem_index(first_name);
+  int n = 1;
+  /* Sub-fields of one register are contiguous and share a backing word.
+   * Vector elements (GPRs, SRs, ...) and booleans have no backing word here
+   * and are always one element each. */
+  if (elems[i].slot)
+    while (i + n < n_elems && elems[i + n].slot == elems[i].slot) n++;
+  hw_first[id] = (int16_t)i;
+  hw_count[id] = (uint8_t)n;
+}
+
+static void build_write_map(void)
+{
+  char nm[16];
+
+  for (int i = 0; i < HW_ID_COUNT; i++) { hw_first[i] = -1; hw_count[i] = 0; }
+
+  for (int i = 0; i < 32; i++) { snprintf(nm, sizeof nm, "gpr%d", i); map_hw(HW_GPR0 + i, nm); }
+  for (int i = 0; i < 32; i++) { snprintf(nm, sizeof nm, "fpr%d", i); map_hw(HW_FPR0 + i, nm); }
+  for (int i = 0; i < 16; i++) { snprintf(nm, sizeof nm, "sr%d",  i); map_hw(HW_SR0  + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "sprg%d", i); map_hw(HW_SPRG0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batu%d", i); map_hw(HW_BATU0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batl%d", i); map_hw(HW_BATL0 + i, nm); }
+
+  map_hw(HW_CR,    "cr0");        /* 8 fields  */
+  map_hw(HW_XER,   "xer.so");     /* 5 fields  */
+  map_hw(HW_FPSCR, "fpscr.fx");   /* 23 fields */
+
+  map_hw(HW_CIA,   "cia");
+  map_hw(HW_NIA,   "nia");
+  map_hw(HW_LR,    "lr");
+  map_hw(HW_CTR,   "ctr");
+  map_hw(HW_MSR,   "msr");
+  map_hw(HW_SRR0,  "srr0");
+  map_hw(HW_SRR1,  "srr1");
+  map_hw(HW_DAR,   "dar");
+  map_hw(HW_DSISR, "dsisr");
+  map_hw(HW_DEC,   "dec");
+  map_hw(HW_SDR1,  "sdr1");
+  map_hw(HW_EAR,   "ear");
+  map_hw(HW_RESERVATION, "reservation");
+
+  map_hw(HW_MQ,   "mq");
+  map_hw(HW_RTCU, "rtcu");
+  map_hw(HW_RTCL, "rtcl");
+  map_hw(HW_HID0, "hid0");
+  map_hw(HW_HID1, "hid1");
+  map_hw(HW_IABR, "iabr");
+  map_hw(HW_DABR, "dabr");
+  map_hw(HW_PIR,  "pir");
+
+  /* cia/nia/lr/... are single 32-bit registers with no named sub-fields, so
+   * the run-of-elements rule above must have found exactly one of each; if it
+   * found more, two elements are sharing a backing word by accident and the
+   * write-set would name both. */
+  static const int singles[] = { HW_CIA, HW_NIA, HW_LR, HW_CTR, HW_MSR, HW_SRR0,
+                                 HW_SRR1, HW_DAR, HW_DSISR, HW_DEC, HW_SDR1,
+                                 HW_EAR, HW_MQ, HW_RTCU, HW_RTCL, HW_HID0,
+                                 HW_HID1, HW_IABR, HW_DABR, HW_PIR };
+  for (size_t i = 0; i < sizeof singles / sizeof singles[0]; i++)
+    if (hw_count[singles[i]] != 1) {
+      fprintf(stderr, "harness: register id 0x%02X covers %u elements, expected 1\n",
+              singles[i], hw_count[singles[i]]);
+      exit(1);
+    }
+}
+
+/* ======================================================================= */
 /* Memory: touched-byte tracking                                            */
 /* ======================================================================= */
 
@@ -470,31 +570,81 @@ static const elem_t *find_elem(const char *nm)
  *
  * Occupancy is stamped with a generation counter rather than cleared, so
  * RESET is O(bytes actually written) rather than O(table size).
- */
+ *
+ * The table GROWS rather than having one fixed size.  It used to hold 65536
+ * bytes, which is exactly the size of the generator's memory window — so a
+ * vector that populated its whole window overflowed on the first byte of the
+ * opcode and every step after it reported ERR memory-tracking-overflow.  The
+ * error was harmless (the fallback is correct, just slower) but a caller has
+ * no way to know that from the line alone and rightly discarded the vector.
+ * Starting at 128 Ki slots and doubling keeps the ordinary case at one
+ * allocation while putting the ceiling out of reach of any real vector.
+ *
+ * The ceiling still exists because past a few million bytes the fallback is
+ * the CHEAPER branch: replaying N single-byte writes stops beating freeing a
+ * handful of 16 MiB blocks.  It is a performance crossover, not a limit. */
 
-#define TOUCH_CAP (1u << 17)          /* power of two */
-#define TOUCH_MAX (TOUCH_CAP / 2)     /* keep the load factor at 50% */
+#define TOUCH_INIT_CAP (1u << 17)     /* power of two, slots not bytes    */
+#define TOUCH_MAX_ENTRIES (1u << 22)  /* ~4.2M distinct bytes per RESET   */
 
-static uint32_t touch_key[TOUCH_CAP];
-static uint32_t touch_gen[TOUCH_CAP];
-static uint32_t touch_list[TOUCH_MAX];
+static uint32_t *touch_key;
+static uint32_t *touch_gen;
+static uint32_t *touch_list;
+static uint32_t touch_cap;            /* slots in touch_key/touch_gen     */
+static uint32_t touch_max;            /* entries allowed at this capacity */
 static uint32_t n_touch;
 static uint32_t cur_gen = 1;
 static bool touch_overflow;
 
+/* Doubling the table means rehashing, which is why the insertion-order list
+ * is kept: it is exactly the set of live keys.  Returns false if the table
+ * cannot grow (at the ceiling, or out of memory), which puts RESET on the
+ * kill_mem() path — slower, never wrong. */
+static bool touch_grow(void)
+{
+  uint32_t cap = touch_cap ? touch_cap * 2 : TOUCH_INIT_CAP;
+  if (cap / 2 > TOUCH_MAX_ENTRIES || cap < touch_cap) return false;
+
+  uint32_t *key = calloc(cap, sizeof *key);
+  uint32_t *gen = calloc(cap, sizeof *gen);
+  uint32_t *list = realloc(touch_list, (size_t)(cap / 2) * sizeof *list);
+  if (!key || !gen || !list) { free(key); free(gen); if (list) touch_list = list; return false; }
+
+  free(touch_key);
+  free(touch_gen);
+  touch_key = key;
+  touch_gen = gen;
+  touch_list = list;
+  touch_cap = cap;
+  touch_max = cap / 2;                /* keep the load factor at 50% */
+
+  /* calloc zeroed the stamps and cur_gen is never 0, so every slot reads as
+   * stale; reinsert what is live. */
+  for (uint32_t i = 0; i < n_touch; i++) {
+    uint32_t a = touch_list[i];
+    uint32_t h = (a * 2654435761u) & (touch_cap - 1);
+    while (touch_gen[h] == cur_gen) h = (h + 1) & (touch_cap - 1);
+    touch_gen[h] = cur_gen;
+    touch_key[h] = a;
+  }
+  return true;
+}
+
 static void touch_mark(uint32_t a)
 {
-  uint32_t h = (a * 2654435761u) & (TOUCH_CAP - 1);
+  if (touch_overflow) return;
+  if (n_touch >= touch_max && !touch_grow()) { touch_overflow = true; return; }
+
+  uint32_t h = (a * 2654435761u) & (touch_cap - 1);
   for (;;) {
     if (touch_gen[h] != cur_gen) {
-      if (n_touch >= TOUCH_MAX) { touch_overflow = true; return; }
       touch_gen[h] = cur_gen;
       touch_key[h] = a;
       touch_list[n_touch++] = a;
       return;
     }
     if (touch_key[h] == a) return;
-    h = (h + 1) & (TOUCH_CAP - 1);
+    h = (h + 1) & (touch_cap - 1);
   }
 }
 
@@ -515,7 +665,7 @@ static void mem_clear_all(void)
   touch_overflow = false;
   cur_gen++;
   if (cur_gen == 0) {                 /* wrapped: every stamp is stale again */
-    memset(touch_gen, 0, sizeof touch_gen);
+    if (touch_gen) memset(touch_gen, 0, (size_t)touch_cap * sizeof *touch_gen);
     cur_gen = 1;
   }
 }
@@ -524,32 +674,70 @@ static void mem_clear_all(void)
 /* Footprint recording (the model/ppc_harness.sail hooks)                   */
 /* ======================================================================= */
 
-#define MAX_ACC 512            /* lswi/stmw move at most 32 words           */
-#define MAX_DIRTY 1024         /* bytes one instruction can write           */
 #define MAX_EXC 8
 
+/* One list per access kind, in the order the accesses happened.  They grow on
+ * demand rather than living in fixed arrays, because a truncated footprint is
+ * the one failure this whole project exists to avoid: an access the harness
+ * does not report becomes a read the vector does not list, and a runner that
+ * trusts the vector then passes on state the instruction actually consulted.
+ * A step's footprint is bounded in practice (the widest single instruction is
+ * a 32-register lmw/stmw, and each of its accesses can drag a page-table walk
+ * behind it), so the growth is a safety net, not a hot path. */
 typedef struct { uint32_t addr; uint8_t width; } acc_t;
 
-static acc_t acc_r[MAX_ACC], acc_w[MAX_ACC], acc_f[MAX_ACC];
-static int n_acc_r, n_acc_w, n_acc_f;
+typedef struct { acc_t *v; int n, cap; const char *tag; } acclist_t;
+
+static acclist_t acc_r  = { NULL, 0, 0, "FMR " };
+static acclist_t acc_w  = { NULL, 0, 0, "FMW " };
+static acclist_t acc_f  = { NULL, 0, 0, "FF " };
+static acclist_t acc_tr = { NULL, 0, 0, "FTR " };
+static acclist_t acc_tw = { NULL, 0, 0, "FTW " };
 static bool acc_overflow;
 
 /* Pre-step contents of every byte the step is about to overwrite.  Captured
  * in the hook, which the model calls BEFORE the write lands — that is the
  * whole reason the hook is placed where it is. */
 typedef struct { uint32_t addr; uint8_t old; } dirty_t;
-static dirty_t dirty[MAX_DIRTY];
-static int n_dirty;
+static dirty_t *dirty;
+static int n_dirty, dirty_cap;
 
 static uint32_t exc_vec[MAX_EXC];
 static int n_exc;
 
 static bool step_active;
 
+/* Both lists double from 64.  Returns the new block, or NULL — on failure the
+ * step is marked overflowed and the response says so; nothing is dropped
+ * quietly. */
+static void *grow(void *p, int *cap, size_t elem)
+{
+  int next = *cap ? *cap * 2 : 64;
+  void *q = realloc(p, (size_t)next * elem);
+  if (q) *cap = next;
+  return q;
+}
+
+static void acc_note(acclist_t *l, uint32_t a, uint8_t w)
+{
+  if (l->n >= l->cap) {
+    acc_t *v = grow(l->v, &l->cap, sizeof *l->v);
+    if (!v) { acc_overflow = true; return; }
+    l->v = v;
+  }
+  l->v[l->n].addr = a;
+  l->v[l->n].width = w;
+  l->n++;
+}
+
 static void dirty_note(uint32_t a)
 {
   for (int i = 0; i < n_dirty; i++) if (dirty[i].addr == a) return;
-  if (n_dirty >= MAX_DIRTY) { acc_overflow = true; return; }
+  if (n_dirty >= dirty_cap) {
+    dirty_t *d = grow(dirty, &dirty_cap, sizeof *dirty);
+    if (!d) { acc_overflow = true; return; }
+    dirty = d;
+  }
   dirty[n_dirty].addr = a;
   dirty[n_dirty].old = (uint8_t)read_mem(a);
   n_dirty++;
@@ -561,18 +749,20 @@ unit harness_note_mem(const fbits kind, const fbits addr, const fbits width)
 
   uint32_t a = (uint32_t)addr;
   uint8_t w = (uint8_t)width;
-  acc_t *tab;
-  int *n;
+  bool is_write = (kind == HARNESS_MEM_WRITE || kind == HARNESS_MEM_WALK_WRITE);
 
   switch (kind) {
-  case HARNESS_MEM_READ:  tab = acc_r; n = &n_acc_r; break;
-  case HARNESS_MEM_WRITE: tab = acc_w; n = &n_acc_w; break;
-  default:                tab = acc_f; n = &n_acc_f; break;
+  case HARNESS_MEM_READ:       acc_note(&acc_r,  a, w); break;
+  case HARNESS_MEM_WRITE:      acc_note(&acc_w,  a, w); break;
+  case HARNESS_MEM_WALK_READ:  acc_note(&acc_tr, a, w); break;
+  case HARNESS_MEM_WALK_WRITE: acc_note(&acc_tw, a, w); break;
+  default:                     acc_note(&acc_f,  a, w); break;
   }
-  if (*n < MAX_ACC) { tab[*n].addr = a; tab[*n].width = w; (*n)++; }
-  else acc_overflow = true;
 
-  if (kind == HARNESS_MEM_WRITE)
+  /* The byte diff and the RESET-clearing set do not care WHO wrote: an R/C
+   * bit the MMU set is as much a change to memory as a store is, and RESET
+   * must undo it either way. */
+  if (is_write)
     for (uint8_t i = 0; i < w; i++) { dirty_note(a + i); touch_mark(a + i); }
 
   return UNIT;
@@ -581,6 +771,40 @@ unit harness_note_mem(const fbits kind, const fbits addr, const fbits width)
 unit harness_note_exception(const fbits vector)
 {
   if (step_active && n_exc < MAX_EXC) exc_vec[n_exc++] = (uint32_t)vector;
+  return UNIT;
+}
+
+/* --- Register writes ---------------------------------------------------- */
+
+/* Set by the model's write hook, one flag per canonical element.  This is
+ * what makes the reported write-set a WRITE-set rather than a change-set: a
+ * store of the value already present sets the flag with no state diff to show
+ * for it, and that is precisely the case a diff cannot see (see the header of
+ * model/ppc_harness.sail for why it is not a corner case). */
+static uint8_t wrote[MAX_ELEMS];
+
+/* hw_first / hw_count map a register id to the elements it covers; see
+ * build_write_map above.  Most ids name exactly one element; CR, XER and
+ * FPSCR name a contiguous run of them, and the mask says which of the run the
+ * write reached. */
+
+unit harness_note_write(const fbits reg, const fbits mask)
+{
+  if (!step_active) return UNIT;
+
+  unsigned id = (unsigned)reg & (HW_ID_COUNT - 1);
+  int first = hw_first[id];
+  if (first < 0) return UNIT;          /* an id this build does not name */
+
+  int n = hw_count[id];
+  if (n == 1) { wrote[first] = 1; return UNIT; }
+
+  uint32_t m = (uint32_t)mask;
+  for (int i = first; i < first + n; i++) {
+    const elem_t *e = &elems[i];
+    uint32_t em = (uint32_t)(elem_mask(e) << e->lo);
+    if (m & em) wrote[i] = 1;
+  }
   return UNIT;
 }
 
@@ -783,13 +1007,13 @@ static void emit_mem_diff(void)
   }
 }
 
-static void emit_acc(const char *tag, const acc_t *tab, int n)
+static void emit_acc(const acclist_t *l)
 {
-  for (int i = 0; i < n; i++) {
-    oputs(tag);
-    ohex0x(tab[i].addr, 8);
+  for (int i = 0; i < l->n; i++) {
+    oputs(l->tag);
+    ohex0x(l->v[i].addr, 8);
     ochar(' ');
-    odec(tab[i].width);
+    odec(l->v[i].width);
     ochar('\n');
   }
 }
@@ -798,10 +1022,11 @@ static unsigned long step_count;
 
 static void do_step(void)
 {
-  n_acc_r = n_acc_w = n_acc_f = 0;
+  acc_r.n = acc_w.n = acc_f.n = acc_tr.n = acc_tw.n = 0;
   n_dirty = 0;
   n_exc = 0;
   acc_overflow = false;
+  memset(wrote, 0, (size_t)n_elems);
 
   zhalt_req = false;
   zhalt_status = 0;
@@ -841,24 +1066,41 @@ static void do_step(void)
 
   emit_mem_diff();
 
+  /* The write set.  Two sources, deliberately unioned:
+   *
+   *  - the model's write hook, which is exact and is the whole point of it —
+   *    it sees a write that stores the value already there, which no diff can;
+   *  - the state diff, which is the safety net.  Every hook call site was put
+   *    in by hand (there is no choke point for register assignment in Sail),
+   *    so a future model change can add a write that nobody hooked.  If the
+   *    diff ever shows an element the hook did not claim, that has happened,
+   *    and the response says so rather than quietly reporting one write set
+   *    while the model performed another.
+   *
+   * `cia` is exempt from neither: step() writes it every time, and it appears
+   * whenever it changed — which it does when an asynchronous interrupt is
+   * delivered, since check_interrupts() redirects NIA before step() copies it
+   * into CIA.  It is suppressed when unchanged (below) because "the address
+   * the instruction under test ran at" is an input to a vector, not an
+   * output, and a caller reads it from the vector, not from the write set. */
+  bool gap = false;
   for (int i = 0; i < n_elems; i++) {
+    bool changed = elem_get(&elems[i]) != snap[i];
+    if (changed && !wrote[i]) gap = true;
     /* nia is written by every step by construction, so it is reported
-     * unconditionally rather than by diff (a branch-to-self would otherwise
-     * hide it).  cia is reported by diff like everything else, and normally
-     * does not appear: SET cia leaves CIA equal to NIA, so step()'s own
-     * CIA = NIA is a no-op.  It DOES appear when an asynchronous interrupt is
-     * delivered, because check_interrupts() redirects NIA to the vector
-     * before that assignment — which is exactly the case a caller needs to
-     * be told about, since such a step is not a plain single instruction. */
-    if (i != idx_nia && elem_get(&elems[i]) == snap[i]) continue;
+     * unconditionally (a branch-to-self would otherwise hide it). */
+    if (i != idx_nia && i != idx_cia && !wrote[i] && !changed) continue;
+    if (i == idx_cia && !changed) continue;
     oputs("FW ");
     oputs(elems[i].name);
     ochar('\n');
   }
 
-  emit_acc("FMR ", acc_r, n_acc_r);
-  emit_acc("FMW ", acc_w, n_acc_w);
-  emit_acc("FF ", acc_f, n_acc_f);
+  emit_acc(&acc_r);
+  emit_acc(&acc_w);
+  emit_acc(&acc_f);
+  emit_acc(&acc_tr);
+  emit_acc(&acc_tw);
 
   if (n_exc == 0) oputs("EXC none\n");
   else { oputs("EXC "); ohex0x(exc_vec[0], 8); ochar('\n'); }
@@ -877,6 +1119,12 @@ static void do_step(void)
   if (touch_overflow) oputs("ERR memory-tracking-overflow\n");
   if (threw)          oputs("ERR sail-throw\n");
   if (n_exc > 1)      oputs("ERR multiple-exceptions\n");
+  /* An element changed that the model's write hook never claimed: a write
+   * site in the model has no harness_note_write beside it.  The FW lines
+   * above are still complete (the diff is unioned in), but the write set is
+   * no longer trustworthy for the value-preserving case, which is the reason
+   * the hook exists — so this is a bug report, not a vector condition. */
+  if (gap)            oputs("ERR write-tracking-gap\n");
 
   oputs("DONE\n");
   oflush_partial();
@@ -941,6 +1189,7 @@ int main(int argc, char *argv[])
   model_init();
   build_elem_table();
   intern_names();
+  build_write_map();
 
   if (list_elements) {
     for (int i = 0; i < n_elems; i++) printf("%s\n", elems[i].name);
