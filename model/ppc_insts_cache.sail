@@ -211,9 +211,12 @@ function clause execute(DCBI(rA, rB)) =
  * It is a store for translation and protection.  If the page is
  * caching-inhibited or write-through the 601 cannot do that trick and hands
  * the work to software instead, via the alignment exception (§4.8.4) — which
- * is the first and so far only reader of the WIM mode that translation
- * returns.  Note the order: translation happens first, so its reference-bit
- * update lands before the alignment exception, as Figure 6-23 requires.
+ * is the first and so far only reader of the WIMG mode that translation
+ * returns.  The later cores state the same rule (MPC603EUM Table 4-2,
+ * MPC750UM Table 1-5: "the operand of dcbz is in memory that is
+ * write-through-required or caching-inhibited"), so it stays common.
+ * Note the order: translation happens first, so its reference-bit update
+ * lands before the alignment exception, as Figure 6-23 requires.
  *
  * No alignment check on the EA itself: the sector is derived by masking, so
  * it cannot cross a page or 256 MB boundary however misaligned the EA was.
@@ -230,8 +233,8 @@ function clause execute(DCBZ(rA, rB)) = {
   if nonforced_io_segment(ea) then COMPLETED
   else match translate_addr(ea, Mem_store) {
     TR_Fault(cause) => data_access_fault(cause, ea, true),
-    TR_Address(pa, wim) =>
-      if (wim[2] == bitone) | (wim[1] == bitone) then   /* W or I set */
+    TR_Address(pa, wimg) =>
+      if wimg_write_through(wimg) | wimg_cache_inhibited(wimg) then
         alignment_exception(ea)
       else {
         let base = pa & 0xFFFFFFE0;    /* the 32-byte sector holding pa */

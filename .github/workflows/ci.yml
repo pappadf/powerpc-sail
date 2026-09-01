@@ -16,8 +16,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One entry per core directory under model/cores/.
-        core: [p601]
+        # One entry per core the Makefile offers (its CORES variable).  Each
+        # is a separate build of a different source list, so a change that
+        # breaks one core while leaving another green is exactly what this
+        # matrix is here to catch.
+        core: [p601, p603, p604, p604e, p750]
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +64,13 @@ jobs:
 
       - name: Disassembler
         run: make test-disasm CORE=${{ matrix.core }}
+
+      # The single-step harness is a second front end over the same model and
+      # enumerates the architected state by name, which is core-specific
+      # (c/harness.c) — so it can break for one core while the emulator builds
+      # for all of them.
+      - name: Single-step harness
+        run: make harness-test CORE=${{ matrix.core }}
 
   no-build-artifacts:
     # A full build must leave the working tree clean — everything it produces

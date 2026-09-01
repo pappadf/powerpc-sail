@@ -24,6 +24,28 @@ function traceable(inst) =
     _      => true
   }
 
+/* Is this a branch instruction, for the branch trace enabled by MSR[BE]?
+ * "A trace exception is taken when MSR[SE] = 1 or when the currently
+ * completing instruction is a branch and MSR[BE] = 1" (MPC603EUM Table 4-2,
+ * and the same wording in MPC604UM Table 1-2 and MPC750UM Table 1-5).
+ * The four branch instructions are the whole of the branch class: b, bc and
+ * the two register forms (ppc_insts_branch.sail).  The condition register
+ * logical instructions sit in the same chapter but are not branches, and
+ * neither is sc — which traceable() excludes for a different reason.
+ *
+ * The 601 has no MSR[BE] (it is reserved there, so core_msr_implemented holds
+ * it at zero), which is why this needs no core hook: the test below can never
+ * fire on that core. */
+val is_branch : ast -> bool
+function is_branch(inst) =
+  match inst {
+    B(_)     => true,
+    BC(_)    => true,
+    BCLR(_)  => true,
+    BCCTR(_) => true,
+    _        => false
+  }
+
 /* Execute one instruction.  Returns false if the model should stop — that
  * is a harness condition (the halt request or a checkstop, both in
  * ppc_debug.sail), never an ordinary architectural one: exceptions redirect
@@ -59,13 +81,17 @@ function step() = {
                       concat_str(bits_str(instr),
                       concat_str("  ", assembly(inst_ast)))))));
       /* Instruction address breakpoint (§5.4.12.1): the compare happens at
-       * decode and the run-mode exception is taken INSTEAD of executing, so
-       * SRR0 addresses the instruction that did not run.  Priority 3,
-       * instruction-dependent (Table 5-3). */
+       * decode and the exception is taken INSTEAD of executing, so SRR0
+       * addresses the instruction that did not run.  Priority 3,
+       * instruction-dependent (Table 5-3).  Which exception it is differs by
+       * core — run-mode at 0x02000 on the 601, a dedicated instruction
+       * address breakpoint exception at 0x01300 on every later core — so the
+       * core names it (core_inst_breakpoint_exception). */
       if core_inst_breakpoint(CIA) then
-        take_exception(E_RunMode, CIA, 0x0000)
+        take_exception(core_inst_breakpoint_exception(), CIA, 0x0000)
       else {
         let se_before = MSR[SE];
+        let be_before = MSR[BE];
         let completion = execute(inst_ast);
         /* Trace exception (§5.4.12.2), which the 601 vectors to 0x02000
          * alongside the run-mode exception rather than to the
@@ -78,6 +104,15 @@ function step() = {
         match completion {
           COMPLETED =>
             if (se_before == 0b1) & (MSR[SE] == 0b1) & traceable(inst_ast)
+            then take_exception(E_Trace, NIA, 0x0000)
+            /* Branch trace, MSR[BE] (MPC603EUM Table 4-2).  Same vector and
+             * same SRR0 as the single-step trace; the two are one exception
+             * with two enables, so a branch with both bits set traces once.
+             * BE is read before and after for the same reason SE is: an
+             * instruction that changes it should not trace on the new value.
+             * No core that has BE excludes any branch from it, and the ones
+             * traceable() excludes are not branches. */
+            else if (be_before == 0b1) & (MSR[BE] == 0b1) & is_branch(inst_ast)
             then take_exception(E_Trace, NIA, 0x0000),
           EXCEPTION_TAKEN => ()
         }

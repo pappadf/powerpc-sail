@@ -1,0 +1,64 @@
+# PowerPC 601 — the test programs that apply to this core, one per line.
+# Blank lines and #-comments are ignored.  Expected outputs sit beside the
+# programs in test/, where they have always been; every later core has its own
+# manifest and its own test/<core>/ directory.
+#
+# The 601 has a manifest for the same reason the others do: so that adding a
+# program written for a later core (a split IBAT/DBAT test, say, or one that
+# reads the time base) does not silently join this core's suite and fail.
+# Before manifests existed this list was a wildcard over test/*.S, and these
+# are exactly the programs that wildcard matched.
+
+align
+alignmulti
+arith
+bat
+branch
+branchreg
+bytereverse
+cacheops
+clcs
+compare
+crlogic
+crmove
+dabr
+dcbz
+dec
+extctl
+fparith
+fpconv
+fpexc
+fpmadd
+fpmem
+fpmemx
+fpscr
+fpsingle
+iabr
+illegal
+ioseg
+lendian
+load
+logical
+lscbx
+mcrf
+msr
+muldiv
+multiple
+pagetable
+powerarith
+powerdiv
+powermul
+powerrotate
+powershift
+powershifti
+powersra
+reserve
+rotshift
+segreg
+smoke
+store
+string
+sync
+syscall
+trace
+trap

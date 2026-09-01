@@ -20,6 +20,15 @@
  *
  * Keep this interface as small as possible: anything expressible as common
  * PowerPC behaviour belongs in the common model, not here.
+ *
+ * THE SHARED POST-601 LAYER.  The 601 is the odd one out: the 603e, 604,
+ * 604e and 750 all implement the *architected* 32-bit OEA facilities — split
+ * IBAT/DBAT arrays with Vs/Vp validity, the time base, MSR[LE]/[ILE] endian
+ * control — in exactly the same way as one another.  Rather than have four
+ * core directories repeat that, the common implementation of it lives in
+ * model/cores/common/ (ppc32_*.sail) and each of those four cores lists it in
+ * the Makefile ahead of its own files.  It is NOT part of this interface: a
+ * core is free not to use it, as the 601 does not.
  */
 
 $ifndef _PPC_CORE_IFACE
@@ -31,6 +40,22 @@ val core_name : unit -> string
 /* Value of the PVR (SPR 287) for this core.
  * 601: version 0x0001, revision implementation-defined (MPC601UM §2.3.3.11). */
 val core_pvr : unit -> bits(32)
+
+/* The bits the MSR actually implements on this core, as a mask over the whole
+ * register.  Reserved bits cannot be changed and always read as zero, so
+ * mtmsr and rfi mask every value through this (§2.3.1 on the 601, and the
+ * equivalent MSR table on each later core).  The set genuinely differs:
+ * the 601 has no POW/ILE/BE/RI/LE and no MSR-based little-endian control at
+ * all, the 603e adds TGPR, and the 604e and 750 add PM.  See the Msr bitfield
+ * in ppc_regs.sail, which is the union of every core's fields. */
+val core_msr_implemented : unit -> word
+
+/* The bits the decrementer implements.  Both the width and the rate are
+ * implementation-defined: the 601 has only manual bits 0-24, stepping once
+ * per 128 ns oscillator tick (§2.3.3.5), while the later cores implement all
+ * 32 bits and step once per four time-base ticks.  Used by set_dec, so that
+ * software and the timer cannot disagree about which bits exist. */
+val core_dec_implemented : unit -> word
 
 /* Reset all core-specific state (called from the common reset()).
  * Must establish the core's architected reset values, e.g. for the 601:
@@ -59,6 +84,55 @@ val core_exception_vector : PPCException -> bits(32)
  * with Ks/Ku where later cores use Vs/Vp): see cores/p601/p601_mmu.sail. */
 val core_bat_translate : (word, MemoryAccess) -> BatResult
 
+/* --- Direct-store (I/O controller interface) segments, SR[T] = 1 --------- */
+
+/* WHERE the T bit is consulted, which is a real architectural difference and
+ * not just a difference of behaviour (MPC601UM Figure 6-4 against MPC603EUM
+ * Figure 5-6 / MPC750UM Figure 5-6):
+ *
+ *  - the 601 checks T BEFORE MSR[DT] and IGNORES the BAT array for a segment
+ *    with T = 1, so an I/O controller interface access works with data
+ *    translation switched off (§6.5.2.2, §6.7.2) — return true;
+ *  - every later core checks the BAT array first and reaches the segment
+ *    descriptor, and so the T bit, only with translation enabled — return
+ *    false.
+ *
+ * Instruction fetch takes the MSR[IT] check first on every core, so this
+ * governs the data path only. */
+val core_direct_store_first : unit -> bool
+
+/* What an access to a segment with T = 1 does.  Called only when the core's
+ * ordering above says the T bit governs.
+ *  - 601: the I/O controller interface (§6.10) — memory-forced for BUID
+ *    x'07F', otherwise a two-packet bus transaction this model cannot do;
+ *  - 604/604e: the architected direct-store interface, likewise a bus
+ *    transaction (MPC604UM §5.5);
+ *  - 603e and 750: the facility was REMOVED, and the access faults —
+ *    DSI with DSISR[5] for data, ISI with SRR1[3] for a fetch (MPC603EUM
+ *    §1.1.1 and Table 4-2; MPC750UM §5.1.1, Table 5-3).
+ * Takes the effective address rather than the segment descriptor because
+ * SegReg is declared in ppc_regs.sail, which is ordered after this file;
+ * rSR(ea[31 .. 28]) recovers it. */
+val core_direct_store : (word, MemoryAccess) -> TranslationResult
+
+/* Is this T = 1 segment "memory-forced", i.e. an ordinary memory access that
+ * happens to be described by a segment register rather than a page table?
+ * Only the 601 has the notion, via BUID x'07F' (§6.10.4); it is what makes a
+ * cache control instruction operate normally there instead of no-opping, and
+ * what exempts a floating-point access from §5.4.6.1.2's alignment rule.
+ * Later cores have no equivalent and return false.  Takes the effective
+ * address, for the reason given for core_direct_store above. */
+val core_memory_forced_segment : word -> bool
+
+/* Does this core implement the segment descriptor's no-execute bit, SR[N]
+ * (manual bit 3 of a T=0 segment register)?  A fetch from a segment with N
+ * set takes an instruction access exception with SRR1[3], the same bit a
+ * direct-store fetch sets (MPC603EUM Figure 5-6, MPC750UM §5.1.5.2 and
+ * Table 5-3).  The 601 has no such bit — manual bits 3-7 of a T=0 segment
+ * register are reserved (MPC601UM §6.10) — and returns false, so a program
+ * that leaves rubbish there is not faulted for it. */
+val core_segment_no_execute : unit -> bool
+
 /* Effective byte order, for instruction fetch and data alike — on both the
  * 601 and the later cores one control selects it for everything, so one hook
  * covers both.  601: HID0[LM]; 603/604: MSR[LE].  Little-endian is
@@ -74,10 +148,21 @@ val core_bigendian : unit -> bool
 val core_checkstop_enabled : unit -> bool
 
 /* Instruction address breakpoint: does fetching this address trip the core's
- * debug compare, so that a run-mode exception is taken INSTEAD of executing
- * the instruction?  601: IABR (HID2) against the modes in HID1 (§5.4.12.1,
- * Tables 2-23/2-24).  A core without the facility returns false. */
+ * debug compare, so that an exception is taken INSTEAD of executing the
+ * instruction?  601: IABR (HID2) against the modes in HID1 (§5.4.12.1,
+ * Tables 2-23/2-24); 603e/604/604e/750: IABR[CEA] with IABR[BE] set, plus
+ * IABR[TE] against MSR[IT] on the 750.  A core without the facility returns
+ * false. */
 val core_inst_breakpoint : word -> bool
+
+/* WHICH exception that breakpoint raises.  The 601 has no instruction address
+ * breakpoint exception of its own and reports the match as the run-mode
+ * exception at 0x02000 (§5.4.12.1); every later core has a dedicated
+ * instruction address breakpoint exception at 0x01300.  The two are different
+ * exceptions, not one exception at two addresses — the 601's is shared with
+ * MSR[SE] tracing and the others' is not — so the core names it rather than
+ * common code assuming one and letting the vector table paper over it. */
+val core_inst_breakpoint_exception : unit -> PPCException
 
 /* Data address breakpoint: does this data access trip the core's debug
  * compare, so that a data access exception with DSISR[9] is taken instead?

@@ -1,0 +1,81 @@
+# PowerPC 750 (G3) — the test programs in test/ that apply to this core, one per line.
+# Blank lines and #-comments are ignored.  See the note above TEST_SRCS_ALL in
+# the Makefile for how this is used, and test/p750/ for the expected outputs.
+#
+# EVERY program listed here was checked against the 601's expected file and
+# differs from it ONLY in bit 19 of the MSR images it captures — MSR[ME],
+# which the 601 sets at reset (MPC601UM Table 2-11) and this core leaves
+# clear.  So these are not fresh snapshots of current behaviour: they are the
+# 601's hand-derived expectations, re-derived through one documented
+# difference.  The programs' own headers derive their values from the manual
+# and remain the reason to believe them.
+#
+# EXCLUDED, and why.  Each of these needs a test written for this core rather
+# than a rerun of the 601's, and none is excluded because it fails for an
+# unexplained reason:
+#
+#   bat, dcbz     both set up a 601 BAT — one unified array, keyed Ks/Ku, with
+#                 the valid bit in the lower register and block sizes to 8 MB.
+#                 This core has SPLIT IBAT/DBAT arrays keyed Vs/Vp with the
+#                 valid bits in the upper register (cores/common/ppc32_mmu.sail),
+#                 so the same SPR writes describe something else entirely.
+#                 dcbz depends on a BAT to make a block write-through.
+#   clcs, lscbx,  the POWER holdover instructions (cores/p601/p601_insts_power.sail).
+#   power*        601-only, and correctly illegal here.
+#   dec           the 601's decrementer is 25 bits wide and steps once per
+#                 128 ns RTC tick; this core's is 32 bits and steps with the
+#                 time base (cores/common/ppc32_regs.sail).
+#   iabr          the 601 reports an IABR match as a run-mode exception at
+#                 0x02000 under HID1's mode field; this core has a dedicated
+#                 instruction address breakpoint exception at 0x01300 and a
+#                 differently shaped IABR.
+#   lendian       little-endian mode is HID0[LM] on the 601 and MSR[LE] here.
+#   msr           exercises exactly the set of MSR bits the 601 implements.
+#   trace         the 601 vectors MSR[SE] tracing to the run-mode vector
+#                 0x02000; this core uses the architected 0x00D00.
+#   ioseg         the 601's I/O controller interface segments; the 750 does not
+#                 implement the direct-store facility and faults instead
+#                 (MPC750UM §5.1.1).
+
+align
+alignmulti
+arith
+branch
+branchreg
+bytereverse
+cacheops
+compare
+crlogic
+crmove
+dabr
+extctl
+fparith
+fpconv
+fpexc
+fpmadd
+fpmem
+fpmemx
+fpscr
+fpsingle
+illegal
+load
+logical
+mcrf
+muldiv
+multiple
+pagetable
+reserve
+rotshift
+segreg
+smoke
+store
+string
+sync
+syscall
+trap
+
+# Written for these cores rather than inherited from the 601: each exercises a
+# facility the 601 does not have, and none is in test/p601.tests.
+timebase
+ppc32bat
+fpopt

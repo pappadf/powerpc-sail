@@ -49,10 +49,12 @@ enum AlignRule = {
 }
 
 /* Exceptions (interrupts, in later PowerPC terminology).  This is the union
- * of the standard 32-bit PowerPC OEA exceptions and 601-specific ones; each
- * core maps the members it implements onto vector offsets via the
- * core_exception_vector hook (see ppc_core_iface.sail).
- * Reference: MPC601UM Table 5-2 / §5.4. */
+ * of the standard 32-bit PowerPC OEA exceptions and the implementation-
+ * specific ones added by the cores this model covers; each core maps the
+ * members it implements onto vector offsets via the core_exception_vector
+ * hook (see ppc_core_iface.sail), and throws for the rest.
+ * References: MPC601UM Table 5-2 / §5.4; MPC603EUM Table 4-2;
+ * MPC604UM Table 1-2; MPC750UM Table 1-5. */
 enum PPCException = {
   E_Reset,          /* 0x00100 */
   E_MachineCheck,   /* 0x00200 */
@@ -66,7 +68,14 @@ enum PPCException = {
   E_IOCtlError,     /* 0x00A00 -- 601-only: I/O controller interface error (§5.4.10) */
   E_SystemCall,     /* 0x00C00 */
   E_Trace,          /* 0x00D00 -- NOT used by the 601 (601 uses run-mode at 0x02000) */
-  E_FPAssist,       /* 0x00E00 -- NOT implemented on the 601 */
+  E_FPAssist,       /* 0x00E00 -- not implemented by any core modelled here */
+  E_PerfMonitor,    /* 0x00F00 -- 604/604e/750: performance monitor interrupt */
+  E_ITLBMiss,       /* 0x01000 -- 603e/750 software table search (see below)  */
+  E_DTLBMissLoad,   /* 0x01100 -- 603e only                                   */
+  E_DTLBMissStore,  /* 0x01200 -- 603e only                                   */
+  E_InstBreakpoint, /* 0x01300 -- 603e/604/604e/750 IABR match                */
+  E_SystemManagement, /* 0x01400 -- 603e/604/604e/750 SMI input               */
+  E_Thermal,        /* 0x01700 -- 750-only: thermal management interrupt      */
   E_RunMode         /* 0x02000 -- 601-only: run-mode / trace exception (§5.4.11) */
 }
 
@@ -91,7 +100,17 @@ enum FaultCause = {
                              DSISR[4] / SRR1[4]                              */
   Fault_IOSegFetch,       /* fetch from an I/O controller interface segment
                              that is not memory-forced (§6.10): the 601 sets
-                             NO SRR1 bits, where the architecture sets [3]    */
+                             NO SRR1 bits, where the architecture sets [3].
+                             On 603e/604/604e the same fetch sets SRR1[3] —
+                             the architected direct-store rule — which is why
+                             inst_access_fault takes the core's answer rather
+                             than assuming the 601's (ppc_exceptions.sail)    */
+  Fault_DirectStore,      /* a DATA access to a direct-store segment on a core
+                             that no longer supports the facility, or one the
+                             facility does not allow: DSISR[5] (MPC604UM
+                             Table 1-2, MPC603EUM Table 4-2).  Distinct from
+                             Fault_IOSegUnsupported, which is the 601 naming
+                             for the lwarx/stwcx./lscbx case only             */
   Fault_IOSegUnsupported, /* lwarx/stwcx./lscbx in such a segment (§6.10.5):
                              DSISR[5]                                        */
   Fault_DataBreakpoint    /* DABR match (§2.3.3.13.4): DSISR[9].  Not a
@@ -103,13 +122,19 @@ enum FaultCause = {
 }
 
 /* Result of address translation (ppc_mmu.sail).  A success carries the
- * memory/cache access mode (WIM, §6.3) alongside the physical address: it is
+ * memory/cache access mode (WIMG, §6.3) alongside the physical address: it is
  * a property of whatever mechanism did the translation (BAT register, PTE, or
  * a fixed value for the untranslated and I/O cases), and instructions whose
  * behaviour depends on it — dcbz faults when W or I is set (§5.4.6) — have no
- * other way to learn it. */
+ * other way to learn it.
+ *
+ * FOUR bits, not three.  The 601 has only WIM (§6.3) and supplies G = 0
+ * everywhere; every later core adds the G (guarded) bit, so carrying it here
+ * lets one common signature serve both rather than making the width itself
+ * core-specific.  Bit order follows the manual's, so index 3 is W, 2 is I,
+ * 1 is M and 0 is G — see wimg_w and friends in ppc_mmu.sail. */
 union TranslationResult = {
-  TR_Address : (bits(32), bits(3)),      /* physical address, WIM */
+  TR_Address : (bits(32), bits(4)),      /* physical address, WIMG */
   TR_Fault : FaultCause
 }
 
@@ -118,7 +143,7 @@ union TranslationResult = {
  * fall through to page translation (§6.7.4, Figure 6-9). */
 union BatResult = {
   BAT_Miss : unit,                       /* no entry covers this address */
-  BAT_Hit : (bits(32), bits(3)),         /* physical address, WIM */
+  BAT_Hit : (bits(32), bits(4)),         /* physical address, WIMG */
   BAT_Violation : unit                   /* matched, but protection forbids it */
 }
 
