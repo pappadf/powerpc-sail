@@ -1,26 +1,36 @@
-# powerpc-sail — a Sail specification of the PowerPC 601
+# powerpc-sail — a Sail specification of 32-bit PowerPC
 
 [![ci](https://github.com/pappadf/powerpc-sail/actions/workflows/ci.yml/badge.svg)](https://github.com/pappadf/powerpc-sail/actions/workflows/ci.yml)
 
-A formal, executable ISA specification of the **PowerPC 601** — the first
-PowerPC processor, the bridge between POWER and PowerPC, and the CPU of the
-original Power Macintosh — written in
-[Sail](https://github.com/rems-project/sail), the ISA description language
-used for the official RISC-V, CHERI and Arm specification models.
+A formal, executable ISA specification of the 32-bit PowerPC processors,
+written in [Sail](https://github.com/rems-project/sail), the ISA description
+language used for the official RISC-V, CHERI and Arm specification models.
+Five cores are modelled:
 
-The specification is written from the primary source, Motorola's **MPC601
-RISC Microprocessor User's Manual**, cited throughout the model by section
-(`§6.8.3.2`), table (`Table 3-40`), figure and chapter-10 instruction page.
-Where the manual is ambiguous or contradicts itself — and on the 601 it does
-so more than once — the model states the conflict, argues which reading
-governs, and says so in the source rather than picking silently.  The manual
-is not redistributed here; you will need your own copy to follow the
-citations.
+| `CORE=` | Processor | PVR version | Notable |
+|---|---|---|---|
+| `p601`  | PowerPC 601  | `0x0001` | the POWER/PowerPC bridge: 28 POWER holdover instructions, the RTC, one unified BAT array, I/O controller interface segments |
+| `p603`  | PowerPC 603  | `0x0003` | software TLB reload (`tlbld`/`tlbli`), `MSR[TGPR]`, no direct-store, no DABR |
+| `p604`  | PowerPC 604  | `0x0004` | direct-store interface retained, performance monitor, PIR |
+| `p604e` | PowerPC 604e | `0x0009` | the 604 plus `HID1`, `MMCR1` and `PMC3`/`PMC4` |
+| `p750`  | PowerPC 750 (G3) | `0x0008` | L2 cache control, thermal assist unit, user-readable performance monitor mirrors, no direct-store |
 
-The model is structured for more than one core: everything architecture-common
-lives in `model/`, and each implementation supplies the hooks in
-`model/ppc_core_iface.sail` from its own directory under `model/cores/`.  Only
-the 601 exists today; the 603 and 604 are the reason the seam is there.
+The specification is written from the primary sources — Motorola's **MPC601**,
+**MPC603e**, **MPC604**, **MPC604e** and **MPC750** user's manuals, and the
+**Programming Environments Manual** (MPCFPE32B) for the architecture the four
+later cores share — cited throughout the model by section (`§6.8.3.2`), table
+(`Table 3-40`), figure and instruction page.  Where a manual is ambiguous or
+contradicts itself — and they do, more than once each — the model states the
+conflict, argues which reading governs, and says so in the source rather than
+picking silently.  The manuals are not redistributed here; you will need your
+own copies to follow the citations.
+
+Everything architecture-common lives in `model/`, and each core supplies the
+hooks in `model/ppc_core_iface.sail` from its own directory under
+`model/cores/`.  The 601 implements those hooks alone; the 603, 604, 604e and
+750 share the architected 32-bit OEA facilities it predates — the time base,
+split IBAT/DBAT arrays, `MSR[LE]` endian control — from
+`model/cores/common/`.
 
 ## A note on AI
 
@@ -34,15 +44,19 @@ ground truth.
 
 | Piece | State |
 |---|---|
-| Instruction AST, decoder and execute semantics — **187 instructions** | **done** |
+| Instruction AST, decoder and execute semantics — **187** instructions on the 601, **164-166** on the later cores | **done** |
 | The 28 POWER holdovers the 601 keeps (`abs`, `doz`, `mul`/`div` with MQ, the `*q` shifts, `lscbx`, `clcs`) | **done** |
+| The post-601 additions — `mftb`, `tlbsync`, `stfiwx`, `fsel`, `fres`, and the 603's `tlbld`/`tlbli` | **done** |
 | Disassembler — a bidirectional `assembly` mapping, objdump-style syntax, every instruction covered | **done** |
 | Floating point — IEEE 754 single/double from scratch, exact intermediates, full FPSCR and exception model | **done** |
 | MMU — BATs, segment registers, hashed page table, I/O controller interface segments, protection, R/C bits | **done** |
 | Exceptions — alignment, DSI/ISI, program, FP unavailable, decrementer, system call, trace, run mode, checkstop | **done** |
 | RTC, DEC and the 601's dual SPR numbering | **done** |
-| Debug facilities — IABR/DABR address compare | partial: IABR compare modes `111` and `100` unimplemented |
-| Cores other than the 601 | interface scaffolded, only `p601` implemented |
+| Debug facilities — IABR/DABR address compare | partial: the 601's IABR compare modes `111` and `100` unimplemented |
+| Time base, split IBAT/DBAT arrays, `MSR[LE]`/`[ILE]` endian control | **done** (603, 604, 604e, 750) |
+| Performance monitor, thermal assist unit, L2 control | registers only — nothing is counted or sensed; see *Known divergences* |
+| The 603's software TLB reload | registers and instructions present, miss exceptions unreachable; see *Known divergences* |
+| `frsqrte` | **not implemented** on any core; see *Known divergences* |
 | Cache model | out of scope — `dcbz` has its architectural effect, the rest are no-ops |
 | TLB | deliberately not modelled; translation walks the page table afresh each access |
 | Devices and platform | out of scope — the harness offers a halt call and a final state dump |
@@ -102,6 +116,39 @@ the source:
   than on a miss — the same values, differing only in bus traffic, which is
   not modelled either.
 
+Divergences specific to the post-601 cores:
+
+- **`frsqrte` is not implemented**, and so decodes as illegal, on all four
+  cores that have it.  It needs a square-root kernel `model/ppc_softfloat.sail`
+  does not have; `fres`, which is implemented, gets its special cases from the
+  divide evaluator and could not lend them to a square root.  This is a gap,
+  unlike `fsqrt`/`fsqrts` and `tlbia`, which none of these cores implements
+  either and which are correctly illegal.
+- **The 603's three TLB miss exceptions (`0x01000`/`0x01100`/`0x01200`) are
+  unreachable**, because the model has no TLB to miss in.  A genuine page
+  fault still reaches the DSI or ISI handler with the same fault image the
+  603's miss handler would eventually produce, so the architectural outcome
+  survives; a program that counts miss exceptions, or that installs TLB
+  entries describing something other than the page table, does not.
+  `tlbld` and `tlbli` are privileged no-ops for the same reason.
+- **Nothing is counted or sensed.**  The 604/604e/750 performance monitor
+  registers and the 750's thermal assist unit and L2 control are read/write
+  state and no more: every event they select is a property of a pipeline,
+  cache or junction this model does not have.  So the performance monitor
+  interrupt (`0x00F00`) and the thermal management interrupt (`0x01700`) can
+  never fire, and `MSR[PM]` has no effect.
+- **`MSR[TGPR]` does not remap GPR0-GPR3** on the 603.  The bit is settable
+  and reads back, but the only thing that sets it in hardware is a TLB miss
+  exception, which cannot occur here.
+- **Per-core alignment rules are not modelled.**  The 603 faults on a
+  misaligned single-register access in little-endian mode and on every
+  multiple or string instruction there (MPC603EUM Table 4-2); the 601's
+  narrower rules in `alignment_fault` are applied on every core.
+- **`eciwx`/`ecowx` decode on the 603**, where the PID6-603e treats them as
+  illegal (MPC603EUM §4.5.7) and only the PID7t-603e implements them.
+- **HID0, HID1, L2CR and the BAT/SPR reserved fields are unmasked** on the
+  later cores, as they are on the 601.
+
 ## Layout
 
 - `model/prelude.sail` — stdlib imports, bit-numbering convention, helpers
@@ -121,7 +168,16 @@ the source:
 - `model/main.sail` — emulator entry point
 - `model/cores/p601/` — the 601: its registers, SPRs, MMU quirks, POWER
   instructions and core-interface implementation
-- `test/` — assembly test programs and their expected final state
+- `model/cores/common/ppc32_*.sail` — the architected 32-bit OEA facilities
+  the 601 predates, shared by the other four: time base, split IBAT/DBAT
+  arrays, the DABR, `mftb`/`tlbsync`/`stfiwx`/`fsel`/`fres`, and the
+  core-interface hooks whose implementation they have in common
+- `model/cores/p603/`, `p604/`, `p604e/`, `p750/` — each core's own registers,
+  SPRs, exception vectors and hooks
+- `test/` — assembly test programs; `test/*.expected` is the 601's expected
+  final state and `test/<core>/` each later core's
+- `test/<core>.tests` — which programs apply to which core, and why the rest
+  do not
 
 File order matters to the build: Sail requires declaration before use, and the
 scattered instruction and SPR definitions are opened and closed by
@@ -138,15 +194,27 @@ programs additionally need a PowerPC cross toolchain — on Debian/Ubuntu,
 
 ```sh
 make check         # typecheck + assembly-clause coverage
-make emulator      # build the C emulator -> build/ppc_p601
+make emulator      # build the C emulator -> build/ppc_<core>
 make run           # build and run the embedded smoke test
-make test          # assemble test/*.S and diff against test/*.expected
+make test          # assemble the programs this core's manifest lists and diff
+                   # against their expected final state
 make test-disasm   # re-run those programs with tracing, exercising the disassembler
 make clean
 ```
 
-Core selection is a variable, `make CORE=p601` (the default, and currently the
-only one).
+Core selection is a variable:
+
+```sh
+make CORE=p601     # PowerPC 601 (the default)
+make CORE=p603     # PowerPC 603
+make CORE=p604     # PowerPC 604
+make CORE=p604e    # PowerPC 604e
+make CORE=p750     # PowerPC 750 (G3)
+```
+
+Every generated artefact is per-core — `build/ppc_<core>`, `build/gen-<core>/`,
+`build/test-<core>/` — so switching `CORE` never links one core's model under
+another's name.
 
 ## Design notes
 

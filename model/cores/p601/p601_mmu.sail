@@ -19,6 +19,57 @@
 $ifndef _P601_MMU
 $define _P601_MMU
 
+/* --- Direct-store: the I/O controller interface (§6.10) ------------------ */
+
+/* The 601 consults SR[T] before MSR[DT] and ignores the BAT array for a
+ * segment with T=1 (§6.5.2.2, §6.7.2) — the architected order, which every
+ * later core follows, is the other way round. */
+function core_direct_store_first() = true
+
+/* BUID x'07F' is the memory-forced encoding (§6.10.4): the access is an
+ * ordinary memory access described by the segment register rather than by a
+ * page table.  No later core has the notion. */
+function core_memory_forced_segment(ea) = {
+  let sr = rSR(ea[31 .. 28]);
+  (sr[T] == 0b1) & (sr[BUID] == 0b001111111)
+}
+
+/* The 601's T=0 segment register has no no-execute bit; manual bits 3-7 are
+ * reserved (§6.10, Figure 6-24). */
+function core_segment_no_execute() = false
+
+/* I/O controller interface segment access, T=1 (§6.10).  601/POWER only:
+ * later cores call this the direct-store facility (604) or drop it (603e,
+ * 750).
+ *
+ * The memory-forced case above becomes an ordinary memory access whose
+ * physical address is the segment register's low four bits followed by
+ * EA[4:31], bypassing every protection mechanism, with WIMG = 0b0110
+ * (cache-inhibited and global; the 601's WIM = 0b011 plus G = 0, which the
+ * 601 does not implement).  This maps a whole 256 MB segment through one
+ * register and no page tables.
+ *
+ * Every other BUID names a device on the I/O controller interface, reached
+ * with a two-packet bus protocol (§6.10.2, §9.6) that has nothing behind it
+ * in this model — hence the throw.  A fetch from such a segment is an
+ * instruction access exception instead (§6.8.2.2), and the 601 sets no SRR1
+ * bits for it where the architecture sets bit 3 (Table 6-3, §5.4.4) — which
+ * is what Fault_IOSegFetch means, as against the Fault_DirectStore the later
+ * cores raise.  Protection is not enforced here at all: the key bit is passed
+ * to the device, which may or may not act on it (§6.10.3).
+ *
+ * The cache instructions are no-ops in these segments (§6.10.6); cache_op and
+ * dcbz check for that themselves (ppc_insts_cache.sail). */
+function core_direct_store(ea, acc) = {
+  let sr = rSR(ea[31 .. 28]);
+  if sr[BUID] == 0b001111111 then
+    TR_Address(sr[P1] @ ea[27 .. 0], 0b0110)
+  else match acc {
+    Mem_fetch => TR_Fault(Fault_IOSegFetch),
+    _ => throw(Model_unimplemented("I/O controller interface transaction"))
+  }
+}
+
 /* The BSM field masks the block logical page index, which is the top 15 bits
  * of an address (manual bits 0-14).  Its six bits align with the LOW end of
  * that field — the rightmost BSM bit against manual address bit 14 (§6.7.3)
@@ -55,7 +106,10 @@ function core_bat_translate(ea, acc) = {
          * the physical block number; the low 17 bits pass through
          * untranslated. */
         let pa_bpi = batl[PBN] | (ea_bpi & mask);
-        result = BAT_Hit(pa_bpi @ ea[16 .. 0], batu[WIM])
+        /* The 601 has no G bit (§6.3 defines W, I and M only), so the mode
+         * this core reports is always unguarded — see TranslationResult in
+         * ppc_types.sail for why the field is four bits wide regardless. */
+        result = BAT_Hit(pa_bpi @ ea[16 .. 0], batu[WIM] @ 0b0)
       } else
         result = BAT_Violation()
     }

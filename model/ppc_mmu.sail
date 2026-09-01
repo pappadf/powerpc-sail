@@ -5,16 +5,17 @@
 
 /* ppc_mmu.sail — address translation, common 32-bit PowerPC skeleton.
  *
- * Translation order (MPC601UM Figure 6-4, Table 6-10):
- *   1. Fetch with MSR[IT]=0, or data access with MSR[DT]=0 and a segment
- *      register with T=0: direct (untranslated), PA = EA, WIM = 0b001.
- *   2. Segment register with T=1 -> I/O controller interface segment.  The
- *      BAT array is IGNORED for these on the 601 (§6.7.2), and for DATA the
- *      T bit is consulted before MSR[DT], so an I/O segment translates even
- *      with data translation off (§6.5.2.2).  Both are 601 deviations from
- *      the architecture, where a matching BAT always wins and T=1 handling
- *      needs MSR[DT]=1.  TODO: move both behind the core interface when a
- *      core that does it the architected way lands.
+ * Translation order (MPC601UM Figure 6-4, Table 6-10; MPC603EUM Figure 5-5
+ * and 5-6; MPC750UM Figure 5-5 and 5-6):
+ *   1. Fetch with MSR[IT]=0, or data access with MSR[DT]=0: direct
+ *      (untranslated), PA = EA, WIMG = 0b0010.
+ *   2. Segment register with T=1 -> the direct-store facility, which the 601
+ *      calls the I/O controller interface.  WHERE this check sits is
+ *      core-specific and core_direct_store_first says which: the 601 takes it
+ *      before MSR[DT] and ignores the BAT array for such a segment (§6.5.2.2,
+ *      §6.7.2), where every later core reaches the segment descriptor only
+ *      after the BAT array has missed and only with translation enabled.
+ *      WHAT it does is core_direct_store.
  *   3. BAT array lookup (core hook: entry format and protection differ).
  *   4. Segment + hashed page table translation.
  *
@@ -30,7 +31,14 @@ $define _PPC_MMU
 
 /* Page table entry, standard 32-bit PowerPC (MPC601UM §6.8.3.2, Table 6-16).
  * Word 0: manual bits: 0 V | 1-24 VSID | 25 H | 26-31 API
- * Word 1: manual bits: 0-19 PPN | 23 R | 24 C | 25-27 WIM | 30-31 PP  */
+ * Word 1: manual bits: 0-19 PPN | 23 R | 24 C | 25-28 WIMG | 30-31 PP
+ *
+ * The G (guarded) bit, manual bit 28, is defined on the 603e, 604, 604e and
+ * 750 and RESERVED on the 601 (MPC601UM Table 6-16 stops at WIM).  It is read
+ * unconditionally here, so on the 601 a PTE with that reserved bit set yields
+ * a non-zero G — which no 601 code path inspects, because the facilities that
+ * consume G (guarded-storage fetch and speculative-access rules) exist only on
+ * the cores that define the bit. */
 bitfield Pte0 : bits(32) = {
   V    : 31,
   VSID : 30 .. 7,
@@ -41,13 +49,25 @@ bitfield Pte1 : bits(32) = {
   PPN : 31 .. 12,
   R   : 8,
   C   : 7,
-  WIM : 6 .. 4,
-  PP  : 1 .. 0
+  WIMG : 6 .. 3,
+  PP   : 1 .. 0
 }
 
+/* Memory/cache access mode bits, by name.  Manual order, so the leftmost bit
+ * of the field is W and the rightmost is G; see TranslationResult in
+ * ppc_types.sail for why the field is four bits wide on every core. */
+val wimg_write_through : bits(4) -> bool
+function wimg_write_through(m) = m[3] == bitone
+
+val wimg_cache_inhibited : bits(4) -> bool
+function wimg_cache_inhibited(m) = m[2] == bitone
+
+val wimg_guarded : bits(4) -> bool
+function wimg_guarded(m) = m[0] == bitone
+
 /* Memory/cache access mode for an untranslated access: write-back, caching
- * enabled, coherency enforced (§6.3, §6.6). */
-let wim_direct : bits(3) = 0b001
+ * enabled, coherency enforced, not guarded (§6.3, §6.6). */
+let wimg_direct : bits(4) = 0b0010
 
 /* Does this access use address translation?  (MSR[IT] for fetch, MSR[DT]
  * for data.) */
@@ -56,6 +76,13 @@ function translation_enabled(acc) =
   match acc {
     Mem_fetch => MSR[IT] == 0b1,
     _            => MSR[DT] == 0b1
+  }
+
+val is_fetch_access : MemoryAccess -> bool
+function is_fetch_access(acc) =
+  match acc {
+    Mem_fetch => true,
+    _         => false
   }
 
 val is_store_access : MemoryAccess -> bool
@@ -128,8 +155,23 @@ function pteg_search(base, h, vsid, api) = {
  * becomes a 52-bit virtual address — VSID from the segment register, then
  * EA[4:19] as the page index and EA[20:31] as the byte offset — and the page
  * table maps its virtual page number to a physical page number. */
+/* The page table half of page_translate, declared here because Sail requires
+ * declaration before use and page_translate calls it. */
+val page_translate_pte : (SegReg, word, MemoryAccess) -> TranslationResult
+
 val page_translate : (SegReg, word, MemoryAccess) -> TranslationResult
 function page_translate(sr, ea, acc) = {
+  /* No-execute (§5.1.5.2 on the 603e and 750): a fetch from a segment with
+   * N set faults before the page table is consulted.  Blocks have no N bit,
+   * so this belongs on the page path and not in translate_mapped. */
+  if core_segment_no_execute() & (sr[N] == 0b1) & is_fetch_access(acc) then
+    TR_Fault(Fault_DirectStore)
+  else page_translate_pte(sr, ea, acc)
+}
+
+/* The page table half of page_translate, split out so the no-execute test
+ * above reads as a guard rather than wrapping the whole body in an else. */
+function page_translate_pte(sr, ea, acc) = {
   let vsid = sr[VSID];
   let api : bits(6) = ea[27 .. 22];       /* VA[24:29] = EA[4:9]  */
   /* Primary hash (§6.9.1.3, Figure 6-18): the low 19 bits of the VSID xor
@@ -155,16 +197,16 @@ function page_translate(sr, ea, acc) = {
                               C = if ok & is_store_access(acc) then 0b1
                                   else pte1[C]];
       if hist.bits != pte1.bits then phys_write_pte(pte_addr + 4, hist.bits);
-      if ok then TR_Address(pte1[PPN] @ ea[11 .. 0], pte1[WIM])
+      if ok then TR_Address(pte1[PPN] @ ea[11 .. 0], pte1[WIMG])
       else TR_Fault(Fault_Protection)
     }
   }
 }
 
-/* --- I/O controller interface segments ---------------------------------- */
+/* --- Direct-store segments (SR[T] = 1) ---------------------------------- */
 
-/* Is this address in an I/O controller interface segment that is NOT
- * memory-forced?  This is the line the manual draws for two separate rules:
+/* Is this address in a direct-store segment that is NOT memory-forced?  This
+ * is the line the 601 manual draws for two separate rules:
  *
  *  - §6.10.5: lwarx, stwcx. and lscbx may not be used there, and take a data
  *    access exception with DSISR[5] (Fault_IOSegUnsupported) if they are;
@@ -172,46 +214,23 @@ function page_translate(sr, ea, acc) = {
  *    MEMORY-FORCED segment "translates the address appropriately and performs
  *    the cache operation based on that address".
  *
- * That second rule is why the predicate excludes BUID x'07F' rather than
- * testing SR[T] alone: the ch. 10 cache pages and §6.10.6 both say flatly
- * "if EA specifies a memory address for which SR[T]=1, the instruction is
- * treated as a no-op", but §3.8.2 is the one that distinguishes the two BUID
- * cases, and being the specific statement it wins.
+ * That second rule is why the predicate excludes the memory-forced case
+ * rather than testing SR[T] alone: the ch. 10 cache pages and §6.10.6 both
+ * say flatly "if EA specifies a memory address for which SR[T]=1, the
+ * instruction is treated as a no-op", but §3.8.2 is the one that
+ * distinguishes the two cases, and being the specific statement it wins.
+ * §5.4.6.1.2's floating-point rule uses the same line (M.8).
  *
- * §5.4.6.1.2's floating-point rule uses the same line (M.8). */
+ * Only the 601 has memory-forced segments, so on every later core this is
+ * simply SR[T] = 1 — which is exactly what those cores' manuals say for the
+ * same rules (MPC603EUM §3.4.3: "any cache control instruction that generates
+ * an effective address that corresponds to a direct-store segment (SR[T] = 1)
+ * is treated as a no-op"). */
 val nonforced_io_segment : word -> bool
 function nonforced_io_segment(ea) = {
   let sr = rSR(ea[31 .. 28]);
-  (sr[T] == 0b1) & (sr[BUID] != 0b001111111)
+  (sr[T] == 0b1) & not_bool(core_memory_forced_segment(ea))
 }
-
-/* I/O controller interface segment access, T=1 (§6.10).  601/POWER only:
- * later cores call this the direct-store facility (603) or drop it (604).
- *
- * The BUID x'07F' encoding is the memory-forced case (§6.10.4): the access
- * becomes an ordinary memory access whose physical address is the segment
- * register's low four bits followed by EA[4:31], bypassing every protection
- * mechanism, with WIM = 0b011 (cache-inhibited and global).  This maps a
- * whole 256 MB segment through one register and no page tables.
- *
- * Every other BUID names a device on the I/O controller interface, reached
- * with a two-packet bus protocol (§6.10.2, §9.6) that has nothing behind it
- * in this model — hence the throw.  A fetch from such a segment is an
- * instruction access exception instead (§6.8.2.2), and the 601 sets no SRR1
- * bits for it where the architecture sets bit 3 (Table 6-3, §5.4.4).
- * Protection is not enforced here at all: the key bit is passed to the
- * device, which may or may not act on it (§6.10.3).
- *
- * The cache instructions are no-ops in these segments (§6.10.6); cache_op
- * and dcbz check for that themselves (ppc_insts_cache.sail). */
-val io_segment_translate : (SegReg, word, MemoryAccess) -> TranslationResult
-function io_segment_translate(sr, ea, acc) =
-  if sr[BUID] == 0b001111111 then
-    TR_Address(sr[P1] @ ea[27 .. 0], 0b011)
-  else match acc {
-    Mem_fetch => TR_Fault(Fault_IOSegFetch),
-    _ => throw(Model_unimplemented("I/O controller interface transaction"))
-  }
 
 /* --- Top-level translation ---------------------------------------------- */
 
@@ -221,28 +240,52 @@ function io_segment_translate(sr, ea, acc) =
 val translate_mapped : (SegReg, word, MemoryAccess) -> TranslationResult
 function translate_mapped(sr, ea, acc) =
   match core_bat_translate(ea, acc) {
-    BAT_Hit(pa, wim) => TR_Address(pa, wim),
-    BAT_Violation()  => TR_Fault(Fault_Protection),
-    BAT_Miss()       => page_translate(sr, ea, acc)
+    BAT_Hit(pa, wimg) => TR_Address(pa, wimg),
+    BAT_Violation()   => TR_Fault(Fault_Protection),
+    BAT_Miss()        => page_translate(sr, ea, acc)
+  }
+
+/* Block, then segment, for a core that consults the BAT array before the
+ * segment descriptor — every core but the 601 (MPC603EUM Figure 5-5/5-6,
+ * MPC750UM Figure 5-5/5-6).  A BAT hit wins outright and the T bit is never
+ * reached, which is the architected order the 601 inverts. */
+val translate_bat_then_segment : (word, MemoryAccess) -> TranslationResult
+function translate_bat_then_segment(ea, acc) =
+  match core_bat_translate(ea, acc) {
+    BAT_Hit(pa, wimg) => TR_Address(pa, wimg),
+    BAT_Violation()   => TR_Fault(Fault_Protection),
+    BAT_Miss()        => {
+      let sr = rSR(ea[31 .. 28]);
+      if sr[T] == 0b1 then core_direct_store(ea, acc)
+      else page_translate(sr, ea, acc)
+    }
   }
 
 val translate_addr : (word, MemoryAccess) -> TranslationResult
 function translate_addr(ea, acc) = {
   let sr = rSR(ea[31 .. 28]);
   match acc {
-    /* Fetch: MSR[IT] is checked first, so an I/O controller interface
-     * segment is not even looked at with translation off (§6.8.2.2). */
+    /* Fetch: the MSR translation-enable bit is checked first on every core,
+     * so a direct-store segment is not even looked at with translation off
+     * (MPC601UM §6.8.2.2, and the same order in Figure 5-5 of the 603e and
+     * 750 manuals). */
     Mem_fetch =>
-      if MSR[IT] == 0b0 then TR_Address(ea, wim_direct)
-      else if sr[T] == 0b1 then io_segment_translate(sr, ea, acc)
-      else translate_mapped(sr, ea, acc),
-    /* Data: the T bit is checked BEFORE MSR[DT] (§6.5.2, Figure 6-4), which
-     * is what makes an I/O controller interface access work with data
-     * translation disabled. */
+      if MSR[IT] == 0b0 then TR_Address(ea, wimg_direct)
+      else if core_direct_store_first() then {
+        if sr[T] == 0b1 then core_direct_store(ea, acc)
+        else translate_mapped(sr, ea, acc)
+      } else translate_bat_then_segment(ea, acc),
+    /* Data: on the 601 the T bit is checked BEFORE MSR[DT] (§6.5.2,
+     * Figure 6-4), which is what makes an I/O controller interface access
+     * work with data translation disabled; every later core checks MSR[DR]
+     * first and reaches the T bit only after the BAT array misses. */
     _ =>
-      if sr[T] == 0b1 then io_segment_translate(sr, ea, acc)
-      else if MSR[DT] == 0b0 then TR_Address(ea, wim_direct)
-      else translate_mapped(sr, ea, acc)
+      if core_direct_store_first() then {
+        if sr[T] == 0b1 then core_direct_store(ea, acc)
+        else if MSR[DT] == 0b0 then TR_Address(ea, wimg_direct)
+        else translate_mapped(sr, ea, acc)
+      } else if MSR[DT] == 0b0 then TR_Address(ea, wimg_direct)
+      else translate_bat_then_segment(ea, acc)
   }
 }
 

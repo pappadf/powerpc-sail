@@ -198,7 +198,17 @@ static void err(const char *msg, const char *detail)
  * exceptions are the register vectors, whose element addresses are only known
  * once model_init() has allocated them, and the booleans. */
 
-enum { VS_NONE = 0, VS_GPR, VS_FPR, VS_SR, VS_BATU, VS_BATL };
+/* Which register VECTOR an element lives in, if any.  The BAT kinds are
+ * core-specific: the 601 has one unified array (BATU/BATL) and every later
+ * core has split instruction and data arrays (IBATU/IBATL/DBATU/DBATL), so
+ * only one of the two groups exists in any given build. */
+enum { VS_NONE = 0, VS_GPR, VS_FPR, VS_SR,
+#ifdef PPC_CORE_P601
+       VS_BATU, VS_BATL
+#else
+       VS_IBATU, VS_IBATL, VS_DBATU, VS_DBATL
+#endif
+     };
 
 typedef struct {
   const char *name;
@@ -349,21 +359,81 @@ static void build_elem_table(void)
   add_reg("sprg2", &zSPRG2);
   add_reg("sprg3", &zSPRG3);
   add_reg("dec",   &zDEC);
-  add_reg("rtcu",  &zRTCU);
-  add_reg("rtcl",  &zRTCL);
   add_reg("sdr1",  &zSDR1.zbits);
   add_reg("ear",   &zEAR.zbits);
 
-  for (int i = 0; i < 16; i++) add_vec("sr",   i, VS_SR,   32);
-  for (int i = 0; i < 4;  i++) add_vec("batu", i, VS_BATU, 32);
-  for (int i = 0; i < 4;  i++) add_vec("batl", i, VS_BATL, 32);
+  for (int i = 0; i < 16; i++) add_vec("sr", i, VS_SR, 32);
 
+  /* --- from here the state is the CORE's, and the build has exactly one --- */
+#ifdef PPC_CORE_P601
+  add_reg("rtcu",  &zRTCU);
+  add_reg("rtcl",  &zRTCL);
+  for (int i = 0; i < 4; i++) add_vec("batu", i, VS_BATU, 32);
+  for (int i = 0; i < 4; i++) add_vec("batl", i, VS_BATL, 32);
   add_reg("mq",   &zMQ);
   add_reg("hid0", &zHID0.zbits);
   add_reg("hid1", &zHID1.zbits);
   add_reg("iabr", &zIABR.zbits);
   add_reg("dabr", &zDABR.zbits);
   add_reg("pir",  &zPIR);
+#else
+  /* The shared post-601 layer (model/cores/common/ppc32_regs.sail). */
+  add_reg("tbu",   &zTBU);
+  add_reg("tbl",   &zTBL);
+  for (int i = 0; i < 4; i++) add_vec("ibatu", i, VS_IBATU, 32);
+  for (int i = 0; i < 4; i++) add_vec("ibatl", i, VS_IBATL, 32);
+  for (int i = 0; i < 4; i++) add_vec("dbatu", i, VS_DBATU, 32);
+  for (int i = 0; i < 4; i++) add_vec("dbatl", i, VS_DBATL, 32);
+  add_reg("hid0",  &zHID0);
+  add_reg("iabr",  &zIABR.zbits);
+#endif
+
+#if defined(PPC_CORE_P603)
+  add_reg("hid1",  &zHID1);
+  add_reg("dmiss", &zDMISS);
+  add_reg("imiss", &zIMISS);
+  add_reg("dcmp",  &zDCMP);
+  add_reg("icmp",  &zICMP);
+  add_reg("hash1", &zHASH1);
+  add_reg("hash2", &zHASH2);
+  add_reg("rpa",   &zRPA);
+#elif defined(PPC_CORE_P604)
+  add_reg("dabr",  &zDABR.zbits);
+  add_reg("pir",   &zPIR);
+  add_reg("mmcr0", &zMMCR0);
+  add_reg("pmc1",  &zPMC1);
+  add_reg("pmc2",  &zPMC2);
+  add_reg("sia",   &zSIA);
+  add_reg("sda",   &zSDA);
+#elif defined(PPC_CORE_P604E)
+  add_reg("dabr",  &zDABR.zbits);
+  add_reg("hid1",  &zHID1);
+  add_reg("pir",   &zPIR);
+  add_reg("mmcr0", &zMMCR0);
+  add_reg("mmcr1", &zMMCR1);
+  add_reg("pmc1",  &zPMC1);
+  add_reg("pmc2",  &zPMC2);
+  add_reg("pmc3",  &zPMC3);
+  add_reg("pmc4",  &zPMC4);
+  add_reg("sia",   &zSIA);
+  add_reg("sda",   &zSDA);
+#elif defined(PPC_CORE_P750)
+  add_reg("dabr",  &zDABR.zbits);
+  add_reg("hid1",  &zHID1);
+  add_reg("mmcr0", &zMMCR0);
+  add_reg("mmcr1", &zMMCR1);
+  add_reg("pmc1",  &zPMC1);
+  add_reg("pmc2",  &zPMC2);
+  add_reg("pmc3",  &zPMC3);
+  add_reg("pmc4",  &zPMC4);
+  add_reg("sia",   &zSIA);
+  add_reg("l2cr",  &zL2CR);
+  add_reg("thrm1", &zTHRM1);
+  add_reg("thrm2", &zTHRM2);
+  add_reg("thrm3", &zTHRM3);
+  add_reg("ictc",  &zICTC);
+#endif
+
   add_flag("reservation", &zreservation_valid);
 
   /* Settable but unreported; see the comment on extra[] above. */
@@ -377,8 +447,15 @@ static uint64_t *slot_of(const elem_t *e)
   case VS_GPR:  return &zGPRs.data[e->idx];
   case VS_FPR:  return &zFPRs.data[e->idx];
   case VS_SR:   return &zSRs.data[e->idx];
+#ifdef PPC_CORE_P601
   case VS_BATU: return &zBATU.data[e->idx];
   case VS_BATL: return &zBATL.data[e->idx];
+#else
+  case VS_IBATU: return &zIBATU.data[e->idx];
+  case VS_IBATL: return &zIBATL.data[e->idx];
+  case VS_DBATU: return &zDBATU.data[e->idx];
+  case VS_DBATL: return &zDBATL.data[e->idx];
+#endif
   default:      return e->slot;
   }
 }
@@ -508,8 +585,15 @@ static void build_write_map(void)
   for (int i = 0; i < 32; i++) { snprintf(nm, sizeof nm, "fpr%d", i); map_hw(HW_FPR0 + i, nm); }
   for (int i = 0; i < 16; i++) { snprintf(nm, sizeof nm, "sr%d",  i); map_hw(HW_SR0  + i, nm); }
   for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "sprg%d", i); map_hw(HW_SPRG0 + i, nm); }
-  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batu%d", i); map_hw(HW_BATU0 + i, nm); }
-  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batl%d", i); map_hw(HW_BATL0 + i, nm); }
+#ifdef PPC_CORE_P601
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batu%d", i); map_hw(HW_P601_BATU0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "batl%d", i); map_hw(HW_P601_BATL0 + i, nm); }
+#else
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "ibatu%d", i); map_hw(HW_IBATU0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "ibatl%d", i); map_hw(HW_IBATL0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "dbatu%d", i); map_hw(HW_DBATU0 + i, nm); }
+  for (int i = 0; i < 4;  i++) { snprintf(nm, sizeof nm, "dbatl%d", i); map_hw(HW_DBATL0 + i, nm); }
+#endif
 
   map_hw(HW_CR,    "cr0");        /* 8 fields  */
   map_hw(HW_XER,   "xer.so");     /* 5 fields  */
@@ -529,14 +613,66 @@ static void build_write_map(void)
   map_hw(HW_EAR,   "ear");
   map_hw(HW_RESERVATION, "reservation");
 
-  map_hw(HW_MQ,   "mq");
-  map_hw(HW_RTCU, "rtcu");
-  map_hw(HW_RTCL, "rtcl");
+#ifdef PPC_CORE_P601
+  map_hw(HW_P601_MQ,   "mq");
+  map_hw(HW_P601_RTCU, "rtcu");
+  map_hw(HW_P601_RTCL, "rtcl");
+  map_hw(HW_P601_HID0, "hid0");
+  map_hw(HW_P601_HID1, "hid1");
+  map_hw(HW_P601_IABR, "iabr");
+  map_hw(HW_P601_DABR, "dabr");
+  map_hw(HW_P601_PIR,  "pir");
+#else
+  map_hw(HW_TBU,  "tbu");
+  map_hw(HW_TBL,  "tbl");
   map_hw(HW_HID0, "hid0");
-  map_hw(HW_HID1, "hid1");
   map_hw(HW_IABR, "iabr");
-  map_hw(HW_DABR, "dabr");
-  map_hw(HW_PIR,  "pir");
+#endif
+#if defined(PPC_CORE_P603)
+  map_hw(HW_HID1, "hid1");
+  map_hw(HW_P603_DMISS, "dmiss");
+  map_hw(HW_P603_IMISS, "imiss");
+  map_hw(HW_P603_DCMP,  "dcmp");
+  map_hw(HW_P603_ICMP,  "icmp");
+  map_hw(HW_P603_HASH1, "hash1");
+  map_hw(HW_P603_HASH2, "hash2");
+  map_hw(HW_P603_RPA,   "rpa");
+#elif defined(PPC_CORE_P604)
+  map_hw(HW_DABR,  "dabr");
+  map_hw(HW_PIR,   "pir");
+  map_hw(HW_MMCR0, "mmcr0");
+  map_hw(HW_PMC1,  "pmc1");
+  map_hw(HW_PMC2,  "pmc2");
+  map_hw(HW_SIA,   "sia");
+  map_hw(HW_SDA,   "sda");
+#elif defined(PPC_CORE_P604E)
+  map_hw(HW_DABR,  "dabr");
+  map_hw(HW_HID1,  "hid1");
+  map_hw(HW_PIR,   "pir");
+  map_hw(HW_MMCR0, "mmcr0");
+  map_hw(HW_MMCR1, "mmcr1");
+  map_hw(HW_PMC1,  "pmc1");
+  map_hw(HW_PMC2,  "pmc2");
+  map_hw(HW_PMC3,  "pmc3");
+  map_hw(HW_PMC4,  "pmc4");
+  map_hw(HW_SIA,   "sia");
+  map_hw(HW_SDA,   "sda");
+#elif defined(PPC_CORE_P750)
+  map_hw(HW_DABR,  "dabr");
+  map_hw(HW_HID1,  "hid1");
+  map_hw(HW_MMCR0, "mmcr0");
+  map_hw(HW_MMCR1, "mmcr1");
+  map_hw(HW_PMC1,  "pmc1");
+  map_hw(HW_PMC2,  "pmc2");
+  map_hw(HW_PMC3,  "pmc3");
+  map_hw(HW_PMC4,  "pmc4");
+  map_hw(HW_SIA,   "sia");
+  map_hw(HW_P750_L2CR,  "l2cr");
+  map_hw(HW_P750_THRM1, "thrm1");
+  map_hw(HW_P750_THRM2, "thrm2");
+  map_hw(HW_P750_THRM3, "thrm3");
+  map_hw(HW_P750_ICTC,  "ictc");
+#endif
 
   /* cia/nia/lr/... are single 32-bit registers with no named sub-fields, so
    * the run-of-elements rule above must have found exactly one of each; if it
@@ -544,8 +680,15 @@ static void build_write_map(void)
    * write-set would name both. */
   static const int singles[] = { HW_CIA, HW_NIA, HW_LR, HW_CTR, HW_MSR, HW_SRR0,
                                  HW_SRR1, HW_DAR, HW_DSISR, HW_DEC, HW_SDR1,
-                                 HW_EAR, HW_MQ, HW_RTCU, HW_RTCL, HW_HID0,
-                                 HW_HID1, HW_IABR, HW_DABR, HW_PIR };
+                                 HW_EAR,
+#ifdef PPC_CORE_P601
+                                 HW_P601_MQ, HW_P601_RTCU, HW_P601_RTCL,
+                                 HW_P601_HID0, HW_P601_HID1, HW_P601_IABR,
+                                 HW_P601_DABR, HW_P601_PIR
+#else
+                                 HW_TBU, HW_TBL, HW_HID0, HW_IABR
+#endif
+                               };
   for (size_t i = 0; i < sizeof singles / sizeof singles[0]; i++)
     if (hw_count[singles[i]] != 1) {
       fprintf(stderr, "harness: register id 0x%02X covers %u elements, expected 1\n",
@@ -870,8 +1013,16 @@ static void apply_determinism_knobs(void)
 {
   ztrace_enabled = false;
   mpz_set_ui(zstep_limit, 0);
-  mpz_set_ui(ztick_ns, 0);      /* freezes core_tick(): no RTC, no DEC       */
+  /* Freeze core_tick(), so that a STEP moves no timer and two runs of the
+   * same command stream agree.  Which knob does that is core-specific: the
+   * 601 drives its RTC and decrementer from a nanosecond accumulator, and
+   * every later core from a per-instruction time base increment. */
+#ifdef PPC_CORE_P601
+  mpz_set_ui(ztick_ns, 0);      /* no RTC, no DEC                            */
   mpz_set_ui(zrtc_ns_acc, 0);
+#else
+  mpz_set_ui(ztb_per_instruction, 0);   /* no time base, no DEC              */
+#endif
 }
 
 static void do_reset(void)
@@ -962,8 +1113,15 @@ static void do_opcode(uint32_t op)
    * because that is a Sail function; if the model's munge ever changes, this
    * has to change with it.
    *
-   * HID0[LM] is sail bit 3 of the P601_Hid0 bitfield (manual bit 28). */
+   * Which bit selects the mode is core-specific, and is the same choice
+   * core_bigendian() makes in the model: HID0[LM] on the 601, which is sail
+   * bit 3 of the P601_Hid0 bitfield (manual bit 28), and MSR[LE] on every
+   * later core, which is sail bit 0 (manual bit 31). */
+#ifdef PPC_CORE_P601
   if ((zHID0.zbits >> 3) & 1) a ^= 4;
+#else
+  if (zMSR.zbits & 1) a ^= 4;
+#endif
   mem_put(a + 0, (uint8_t)(op >> 24));
   mem_put(a + 1, (uint8_t)(op >> 16));
   mem_put(a + 2, (uint8_t)(op >> 8));

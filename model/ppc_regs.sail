@@ -123,37 +123,49 @@ register CTR : word
 
 /* --- Machine state register (§2.3.1, Table 2-9) ------------------------- */
 
-/* Bits shown are the 32-bit PowerPC OEA set as implemented by the 601.
- * NOTE 601 deviations (all reserved-on-601): no POW, no ILE, no BE (manual
- * bit 22), no RI (bit 30), no LE (bit 31, LE mode is HID0[LM] instead).
- * When adding 603/604, add POW/ILE/BE/RI/LE here and gate their behaviour
- * through the core interface. */
+/* This bitfield is the UNION of every field any modelled core implements;
+ * which of them exist on a given core is core_msr_implemented(), and mtmsr
+ * and rfi mask through it so a field a core lacks can never be set.  The
+ * names are the manual's, and where two manuals name one bit differently the
+ * 601's name is kept with the later name noted, since renaming a field would
+ * churn every use site for no gain:
+ *
+ *   EP  is IP on the 603e/604/604e/750 (MPC603EUM Table 4-6),
+ *   IT  is IR and DT is DR on those cores.
+ *
+ * 601 (MPC601UM Table 2-9): no POW, TGPR, ILE, BE, PM, RI or LE — little-
+ * endian mode is HID0[LM] there, not an MSR bit.
+ * 603e (MPC603EUM Table 4-6) adds POW, TGPR, ILE, BE, RI, LE.
+ * 604 (MPC604UM Table 2-5) is the 603e set without TGPR;
+ * 604e and 750 add PM (MPC604EUM Table 2-4, MPC750UM Table 2-5). */
 bitfield Msr : word = {
+  POW : 18,  /* manual bit 13: programmable power modes enable         */
+  TGPR: 17,  /* manual bit 14: 603e temporary GPR remapping           */
+  ILE : 16,  /* manual bit 15: endian mode an exception establishes,
+                               copied into LE on exception entry       */
   EE  : 15,  /* manual bit 16: external/decrementer interrupt enable   */
   PR  : 14,  /* manual bit 17: privilege level (0=supervisor, 1=user)  */
   FP  : 13,  /* manual bit 18: floating-point available                */
   ME  : 12,  /* manual bit 19: machine check enable                    */
   FE0 : 11,  /* manual bit 20: FP exception mode 0                     */
   SE  : 10,  /* manual bit 21: single-step trace enable                */
+  BE  : 9,   /* manual bit 22: branch trace enable                     */
   FE1 : 8,   /* manual bit 23: FP exception mode 1                     */
   EP  : 6,   /* manual bit 25: exception prefix (0 -> 0x000n_nnnn,
-                                                 1 -> 0xFFFn_nnnn)     */
-  IT  : 5,   /* manual bit 26: instruction address translation enable  */
-  DT  : 4    /* manual bit 27: data address translation enable         */
+                                                 1 -> 0xFFFn_nnnn);
+                               called IP on the 603e and later         */
+  IT  : 5,   /* manual bit 26: instruction address translation enable
+                               (IR on the 603e and later)              */
+  DT  : 4,   /* manual bit 27: data address translation enable
+                               (DR on the 603e and later)              */
+  PM  : 2,   /* manual bit 29: 604e/750 performance monitor marked     */
+  RI  : 1,   /* manual bit 30: exception is recoverable                */
+  LE  : 0    /* manual bit 31: little-endian mode                      */
 }
 register MSR : Msr
 
-/* The bits the MSR actually implements, as a mask over the whole register.
- * Reserved bits cannot be changed and always read as zero (§2.3.1, note
- * under Table 2-9), so every instruction that writes a whole MSR value —
- * mtmsr and rfi — masks through this.  It must list exactly the fields of
- * the bitfield above; when a core with a different set arrives (603/604
- * add POW/ILE/BE/RI/LE) the implemented set becomes core-specific and this
- * belongs behind a core hook alongside those fields. */
-let msr_implemented : word = 0x0000FD70
-
 val write_msr : word -> unit
-function write_msr(v) = { harness_wrote(hw_msr); MSR = Mk_Msr(v & msr_implemented) }
+function write_msr(v) = { harness_wrote(hw_msr); MSR = Mk_Msr(v & core_msr_implemented()) }
 
 val privilege_level : unit -> PrivilegeLevel
 function privilege_level() = if MSR[PR] == 0b1 then User else Supervisor
@@ -166,7 +178,16 @@ function privilege_level() = if MSR[PR] == 0b1 then User else Supervisor
  * modes is available; if either bit is set, the processor operates in
  * precise mode"), so there is no mode to distinguish and no imprecise
  * reporting path to build.  A core that implements the imprecise modes will
- * need to read the two bits separately. */
+ * need to read the two bits separately.
+ *
+ * The 603e, 604, 604e and 750 DO define Table 4-7's four modes, but all three
+ * non-zero settings report the exception; they differ only in whether it is
+ * precise, and in how far execution may run past the excepting instruction
+ * before it is reported.  This model completes one instruction at a time and
+ * has no way to run ahead, so every mode it can represent is the precise one
+ * and the same OR is exact for those cores too — see the note on SRR1[15] in
+ * program_exception (ppc_exceptions.sail), which is where the difference
+ * would otherwise show. */
 val fp_exceptions_enabled : unit -> bool
 function fp_exceptions_enabled() = (MSR[FE0] | MSR[FE1]) == 0b1
 
@@ -232,13 +253,6 @@ register SPRG3 : word
 register DEC : word
 register DEC_pending : bool  /* latched decrementer exception request */
 
-/* Only the 25 most-significant bits of the DEC exist on the 601: manual bits
- * 0-24, so the low seven read as zero and a write ignores them (§2.3.3.5).
- * Like msr_implemented this is per-core in principle — the rate and the
- * implemented width are both implementation-defined — and moves behind a
- * core hook when a core with a different decrementer arrives. */
-let dec_implemented : word = 0xFFFFFF80
-
 /* The single place the DEC is written, by mtspr and by the timer alike.
  * "Whenever bit 0 of the decrementer changes from 0 to 1, an exception
  * request is signaled", explicitly including when software causes it
@@ -247,7 +261,9 @@ let dec_implemented : word = 0xFFFFFF80
  * which a boolean gives for free. */
 val set_dec : word -> unit
 function set_dec(v) = {
-  let next = v & dec_implemented;
+  /* Which bits exist is core_dec_implemented(): only manual bits 0-24 on the
+   * 601 (§2.3.3.5), all 32 on every later core. */
+  let next = v & core_dec_implemented();
   if (DEC[31] == bitzero) & (next[31] == bitone) then DEC_pending = true;
   harness_wrote(hw_dec);
   DEC = next
@@ -288,9 +304,16 @@ register EAR : Ear
 /* Sixteen 32-bit segment registers, selected by EA[0:3] (top 4 bits).
  * Two formats depending on the T bit: */
 bitfield SegReg : word = {
-  T    : 31,        /* manual bit 0: 0 = memory segment, 1 = I/O ctl segment */
+  T    : 31,        /* manual bit 0: 0 = memory segment, 1 = direct-store
+                                     (the 601 calls it I/O controller)      */
   Ks   : 30,        /* manual bit 1: supervisor key                          */
-  Ku   : 29,        /* manual bit 2: user key                                */
+  Ku   : 29,        /* manual bit 2: user key (Kp on the 603e and later)     */
+  N    : 28,        /* manual bit 3 (T=0): no-execute.  Defined on the 603e,
+                       604, 604e and 750; RESERVED on the 601, which is why
+                       the check is gated on core_segment_no_execute().
+                       NOTE this bit is inside the 601's T=1 BUID field
+                       below, so the two are never both meaningful — N is
+                       read only for T=0 segments.                          */
   VSID : 23 .. 0,   /* manual bits 8-31 (T=0): virtual segment ID            */
   /* T=1 (I/O controller interface segment, POWER holdover — implemented on
    * the 601; later cores treat T=1 as "direct-store", 604 drops it):       */

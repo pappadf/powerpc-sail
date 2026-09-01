@@ -15,6 +15,18 @@ function core_name() = "PowerPC 601"
  * defined (MPC601UM §2.3.3.11), and we use 0x0000. */
 function core_pvr() = 0x00010000
 
+/* MSR fields the 601 implements (Table 2-9): EE PR FP ME FE0 SE FE1 EP IT DT.
+ * It has no POW, TGPR, ILE, BE, PM, RI or LE — little-endian mode is HID0[LM]
+ * (§2.4.3), not an MSR bit.  Derived from the common Msr bitfield so that it
+ * cannot drift from the field list it names. */
+function core_msr_implemented() =
+  [Mk_Msr(zeros(32)) with EE = 0b1, PR = 0b1, FP = 0b1, ME = 0b1, FE0 = 0b1,
+                          SE = 0b1, FE1 = 0b1, EP = 0b1, IT = 0b1,
+                          DT = 0b1].bits
+
+/* Only the 25 most-significant bits of the DEC exist: manual bits 0-24, so
+ * the low seven read as zero and a write ignores them (§2.3.3.5). */
+function core_dec_implemented() = 0xFFFFFF80
 /* Hard reset state, MPC601UM §2.7.1 / Table 2-11 / §5.4.1.2:
  * HID0 = 0x8001_0080; MSR: ME=1, EP=1, everything else 0; GPRs, MQ, RTC,
  * BATs etc. cleared; first fetch from 0xFFF0_0100. */
@@ -91,6 +103,10 @@ function core_checkstop_enabled() = (HID0[CE] | HID0[EM]) == 0b1
  * TODO: mode 111 compares branch targets only, which needs step() to know
  * the fetch followed a taken branch; mode 100 is the HID single-instruction
  * step, which the manual warns loops forever when combined with RM = 10. */
+/* The 601 has no instruction address breakpoint exception of its own: an
+ * IABR match is reported as the run-mode exception (§5.4.12.1). */
+function core_inst_breakpoint_exception() = E_RunMode
+
 function core_inst_breakpoint(cia) =
   (HID1[RM] == 0b10)
   & ((HID1[M] == 0b010) | (HID1[M] == 0b110))

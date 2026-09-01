@@ -50,21 +50,39 @@ function take_exception(e, srr0_val, srr1_hi) = {
   /* One note for the whole MSR update below: every path through it writes at
    * least the eight bits Table 5-6 clears, and the MSR is one state element. */
   harness_wrote(hw_msr);
-  /* MSR update on exception entry (Table 5-6): clear EE PR FP FE0 SE FE1
-   * IT DT; EP unaltered; ME unaltered except that a machine check clears it,
-   * so that a second one checkstops rather than losing the saved state. */
+  /* MSR update on exception entry (MPC601UM Table 5-6, MPC603EUM Table 4-8,
+   * MPC750UM Table 4-6 — the three agree on every bit they share): clear
+   * EE PR FP FE0 SE FE1 IT DT, and on the cores that have them POW, TGPR, BE,
+   * PM and RI; EP and ILE unaltered; ME unaltered except that a machine check
+   * clears it, so that a second one checkstops rather than losing the saved
+   * state; and LE takes the value of ILE, which is the whole point of ILE
+   * ("when an exception occurs, this bit is copied into MSR[LE] to select the
+   * endian mode for the context established by the exception", MPC603EUM
+   * Table 4-6).
+   *
+   * Writing the fields a core does not implement is harmless and deliberate:
+   * they are held at zero by core_msr_implemented() (ppc_regs.sail), so on
+   * the 601 the POW/TGPR/BE/PM/RI writes below are stores of zero over zero
+   * and the LE/ILE copy moves zero to zero.  Spelling the whole architected
+   * rule once beats splitting it across the cores. */
   match e {
     E_MachineCheck => MSR[ME] = 0b0,
     _              => ()
   };
+  MSR[POW] = 0b0;
+  MSR[TGPR] = 0b0;
   MSR[EE] = 0b0;
   MSR[PR] = 0b0;
   MSR[FP] = 0b0;
   MSR[FE0] = 0b0;
   MSR[SE] = 0b0;
+  MSR[BE] = 0b0;
   MSR[FE1] = 0b0;
   MSR[IT] = 0b0;
   MSR[DT] = 0b0;
+  MSR[PM] = 0b0;
+  MSR[RI] = 0b0;
+  MSR[LE] = MSR[ILE];
   harness_wrote(hw_nia);
   NIA = exception_base() | core_exception_vector(e);
   /* Sole choke point for "an exception was taken", so the sole place a test
@@ -124,6 +142,9 @@ function dsisr_of_fault(cause, is_store) = {
       Fault_PageFault        => 0x40000000,  /* manual bit 1 */
       Fault_Protection       => 0x08000000,  /* manual bit 4 */
       Fault_IOSegUnsupported => 0x04000000,  /* manual bit 5 */
+      Fault_DirectStore      => 0x04000000,  /* manual bit 5, MPC603EUM
+                                                Table 4-2 / MPC750UM
+                                                Table 5-3 */
       Fault_DataBreakpoint   => 0x00400000,  /* manual bit 9 */
       /* A fetch fault cannot reach the data path. */
       Fault_IOSegFetch       => zeros(32)
@@ -151,14 +172,20 @@ function data_access_fault(cause, ea, is_store) = {
  * table search fails to find a translation"), which describe the same event
  * from two angles; Table 6-3 mentions only bit 1.
  * 601 deviation: a fetch from an I/O controller interface segment sets NO
- * bits at all, where the architecture sets bit 3 (Table 5-11, Table 6-3). */
+ * bits at all, where the architecture sets bit 3 (Table 5-11, Table 6-3) —
+ * hence two fault causes for what is otherwise one event. */
 val inst_access_fault : FaultCause -> unit
 function inst_access_fault(cause) = {
   let srr1_hi : bits(16) =
     match cause {
-      Fault_PageFault  => 0x4020,  /* manual bits 1 and 10 */
-      Fault_Protection => 0x0800,  /* manual bit 4         */
-      _                => 0x0000
+      Fault_PageFault   => 0x4020,  /* manual bits 1 and 10 */
+      Fault_Protection  => 0x0800,  /* manual bit 4         */
+      /* Manual bit 3, the architected "fetch from a direct-store segment"
+       * bit, which also covers a fetch from a no-execute segment (MPC750UM
+       * Table 5-3).  Fault_IOSegFetch is the 601's version of the same
+       * event and deliberately sets nothing — see ppc_types.sail. */
+      Fault_DirectStore => 0x1000,
+      _                 => 0x0000
     };
   take_exception(E_InstAccess, CIA, srr1_hi)
 }

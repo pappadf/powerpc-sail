@@ -1,8 +1,8 @@
 #!/bin/sh
 # powerpc-sail — self-test for the single-step harness (c/harness.c).
 #
-# Usage: test/harness/run.sh [path-to-harness]
-#        make harness-test
+# Usage: test/harness/run.sh [path-to-harness] [core]
+#        make harness-test [CORE=p601|p603|p604|p604e|p750]
 #
 # Every case drives the harness over a pipe and diffs its response against the
 # expected text inline below, so a failure prints exactly which line moved.
@@ -19,6 +19,18 @@ set -e
 
 HARNESS=${1:-build/ppc_p601_harness}
 [ -x "$HARNESS" ] || { echo "no harness at $HARNESS (make harness)"; exit 1; }
+
+# Which core the harness was built for.  Almost every case below is about the
+# harness protocol rather than about any one core and needs no such knowledge;
+# the exception is case 13, where SELECTING little-endian mode is the point of
+# the test and the control differs — HID0[LM] on the 601, MSR[LE] on every
+# later core (core_bigendian, model/ppc_core_iface.sail).
+CORE=${2:-p601}
+case "$CORE" in
+  p601)                     LE_SET="SET hid0 0x00000008" ;;
+  p603|p604|p604e|p750)     LE_SET="SET msr 0x00000001"  ;;
+  *) echo "run.sh: unknown core $CORE" >&2; exit 1 ;;
+esac
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -647,16 +659,17 @@ check mem-range-must-not-wrap '^ERR'
 
 # ---------------------------------------------------------------------------
 # 13. OPCODE lands where the fetch looks, in little-endian mode too.
-#     HID0[LM] makes the 601 munge the low address bits rather than byte-swap,
-#     which at width 4 is "xor 4" (§2.4.3.3).  Placing the opcode at the
-#     unmunged address left the fetch reading whatever was at a ^ 4: before the
-#     fix this decoded as garbage and took a program exception instead of
-#     executing add.
+#     Little-endian mode munges the low address bits rather than byte-swapping,
+#     which at width 4 is "xor 4" (MPC601UM §2.4.3.3, and the same mechanism on
+#     the later cores).  Placing the opcode at the unmunged address left the
+#     fetch reading whatever was at a ^ 4: before the fix this decoded as
+#     garbage and took a program exception instead of executing add.
+#     $LE_SET is what turns the mode on for this core; see the top of the file.
 # ---------------------------------------------------------------------------
-cat > "$TMP/case" <<'EOF'
+cat > "$TMP/case" <<EOF
 RESET
 SET cia 0x00100000
-SET hid0 0x00000008
+$LE_SET
 SET gpr3 0x00000005
 SET gpr4 0x00000007
 OPCODE 0x7CA32215
