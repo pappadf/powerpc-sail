@@ -194,8 +194,13 @@ function fp_exceptions_enabled() = (MSR[FE0] | MSR[FE1]) == 0b1
 /* --- Floating-point status and control register (§2.2.3, Table 2-1) ----- */
 
 /* The instructions that read and write these bits are in ppc_insts_fp.sail.
- * 601 notes: VXSOFT (manual bit 21) and VXSQRT (bit 22) are NOT implemented
- * on the 601; manual bit 29 (NI on later cores) is reserved. */
+ * As with the Msr bitfield above, this is the UNION of every core's fields:
+ * VXSOFT (manual bit 21), VXSQRT (22) and NI (29) exist on the 603e and
+ * later (MPCFPE32B Table 2-4) but not on the 601 (MPC601UM Table 2-1) —
+ * which core implements what is the core_fpscr_implemented hook, and an
+ * unimplemented bit can never be set because every write is masked through
+ * it (fpscr_raise / fpscr_write).  NI's non-IEEE mode SEMANTICS are not
+ * modelled — the bit is state only; see the README's model-choice notes. */
 bitfield Fpscr : word = {
   FX      : 31,       /* manual bit 0: exception summary                  */
   FEX     : 30,       /* 1: enabled exception summary                     */
@@ -215,12 +220,16 @@ bitfield Fpscr : word = {
   FPRF    : 16 .. 12, /* 15-19: result flags (C, FL, FG, FE, FU)          */
   FPCC    : 15 .. 12, /* 16-19: the condition-code half of FPRF, which the
                          compare instructions set on their own            */
+  VXSOFT  : 10,       /* 21: 603e and later only                          */
+  VXSQRT  : 9,        /* 22: 603e and later only                          */
   VXCVI   : 8,        /* 23 */
   VE      : 7,        /* 24: invalid op exception enable                  */
   OE      : 6,        /* 25 */
   UE      : 5,        /* 26 */
   ZE      : 4,        /* 27 */
   XE      : 3,        /* 28 */
+  NI      : 2,        /* 29: non-IEEE mode enable, 603e and later only
+                             (state only — the mode itself is unmodelled) */
   RN      : 1 .. 0    /* 30-31: rounding mode (00 nearest, 01 trunc,
                                  10 +inf, 11 -inf)                        */
 }

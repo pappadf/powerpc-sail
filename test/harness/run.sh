@@ -157,7 +157,14 @@ check "stw-nochange" '^(FW|FMR|FMW|FF|EXC|M |HALT|ERR|DONE)'
 #    sc              -> system call, vector 0x0C00, SRR0 = next instruction
 #                       (§5.4.10), SRR1[bit 14 of the high half] = 0x0002
 #    all-zero word   -> illegal instruction, program exception 0x0700
-#    256 MB crossing -> alignment exception 0x0600, with DAR and DSISR
+#    alignment       -> exception 0x0600, with DAR and DSISR — the one
+#                       per-core case besides 13, because WHAT faults is a
+#                       per-core rule (core_alignment_fault): the 601 faults
+#                       a word load crossing a 256 MB boundary (§5.4.6.1.1),
+#                       where the later cores complete it in hardware and
+#                       instead fault any floating-point access that is not
+#                       word-aligned (§4.5.6).  Both variants exercise the
+#                       same protocol surface: EXC, DAR, DSISR, FW.
 # ---------------------------------------------------------------------------
 cat > "$TMP/case" <<'EOF'
 RESET
@@ -197,6 +204,7 @@ DONE
 EOF
 check "illegal" '^S (nia|srr0|srr1) |^(EXC|DONE)'
 
+if [ "$CORE" = p601 ]; then
 cat > "$TMP/case" <<'EOF'
 RESET
 SET cia 0x00100000
@@ -222,6 +230,64 @@ EXC 0x00000600
 DONE
 EOF
 check "alignment" '^S (cia|nia|srr0|dar|dsisr) |^(FW|FMR|FMW|FF|EXC|M |HALT|ERR|DONE)'
+else
+# The identical load on a post-601 core: no 256 MB rule, the misaligned
+# word is split in hardware and the load completes (empty memory -> 0).
+cat > "$TMP/case" <<'CASEEOF'
+RESET
+SET cia 0x00100000
+SET gpr3 0x0FFFFFFE
+OPCODE 0x80C30000
+STEP
+QUIT
+---
+S gpr6 0x00000000
+S cia 0x00100000
+S nia 0x00100004
+S srr0 0x00000000
+S dar 0x00000000
+S dsisr 0x00000000
+FW gpr6
+FW nia
+FMR 0x0FFFFFFE 4
+FF 0x00100000 4
+EXC none
+DONE
+CASEEOF
+check "alignment-hw" '^S (cia|nia|srr0|dar|dsisr|gpr6) |^(FW|FMR|FMW|FF|EXC|M |HALT|ERR|DONE)'
+
+# What DOES fault here: lfs f1,0(r3) at an odd EA (§4.5.6, "the operand of
+# a floating-point load or store is not word-aligned").  DSISR per the
+# alignment register-settings table: D-form clears bits 15-16, bit 17 <-
+# instruction bit 5 (0), 18-21 <- bits 1-4 (0b1000), 22-26 <- bits 6-10
+# (frD = 1), 27-31 <- bits 11-15 (rA = 3): 0x00002023.
+cat > "$TMP/case" <<'CASEEOF'
+RESET
+SET cia 0x00100000
+SET msr 0x00002000
+SET gpr3 0x00100001
+OPCODE 0xC0230000
+STEP
+QUIT
+---
+S cia 0x00100000
+S nia 0x00000600
+S srr0 0x00100000
+S dar 0x00100001
+S dsisr 0x00002023
+FW nia
+FW msr
+FW srr0
+FW srr1
+FW dar
+FW dsisr
+FW reservation
+FF 0x00100000 4
+EXC 0x00000600
+DONE
+CASEEOF
+check "alignment-fp" '^S (cia|nia|srr0|dar|dsisr) |^(FW|FMR|FMW|FF|EXC|M |HALT|ERR|DONE)'
+fi
 
 # ---------------------------------------------------------------------------
 # 5. The halt convention still works through the harness: sc with the magic in

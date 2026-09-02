@@ -164,6 +164,45 @@ val core_inst_breakpoint : word -> bool
  * common code assuming one and letting the vector table paper over it. */
 val core_inst_breakpoint_exception : unit -> PPCException
 
+/* --- Alignment exceptions ------------------------------------------------ */
+
+/* Must a data access with this effective address, width and rule class raise
+ * the alignment exception (0x00600) on this core?  Called BEFORE anything
+ * else the instruction would do — the manuals are explicit that "the
+ * appropriate range check is performed before the instruction begins
+ * execution" (MPC601UM §5.4.6.1, MPC603EUM §4.5.6.1) — so an stwcx. whose
+ * reservation is clear, which §5.4.3 exempts from every DATA ACCESS
+ * exception cause, is still range-checked here.
+ *
+ * The rule sets are genuinely per-core, not one set with parameters:
+ *  - 601 (§5.4.6.1): a 256 MB boundary crossing faults ALWAYS, in every
+ *    translation mode; a 4 KB crossing faults under page translation; a
+ *    misaligned lmw/stmw/lwarx/stwcx. that crosses nothing is executed
+ *    (POWER compatibility / boundedly undefined);
+ *  - 603e/604/604e/750 (§4.5.6 in each manual): NO 256 MB rule for
+ *    elementary accesses — "the 604 provides hardware support for misaligned
+ *    storage accesses" — but a misaligned floating-point access, lmw, stmw,
+ *    lwarx, stwcx., eciwx or ecowx faults outright, whatever it crosses.
+ * See cores/p601/p601_core.sail and cores/common/ppc32_core.sail. */
+val core_alignment_fault : (word, int, AlignRule) -> bool
+
+/* The value the alignment exception leaves in the DAR for this access.
+ * Every core stores the computed EA except the 603e, which stores EA + 4
+ * when the fault is a misaligned lmw/stmw/lwarx/stwcx. — "that address
+ * value +4 is stored into the DAR" (MPC603EUM Table 4-14 and §4.5.6.2). */
+val core_alignment_dar : (word, AlignRule) -> word
+
+/* --- FPSCR --------------------------------------------------------------- */
+
+/* The bits this core's FPSCR implements, as a mask in sail bit positions
+ * over the whole register.  Writes are filtered through this, so an
+ * unimplemented bit always reads as zero and never trips the FX transition
+ * rule or the VX summary.  The 601 lacks VXSOFT (manual bit 21) and VXSQRT
+ * (22), and its manual bit 29 is reserved (MPC601UM Table 2-1); the later
+ * cores implement all three — bit 29 as NI (MPCFPE32B Table 2-4).  Manual
+ * bit 20 is architecturally reserved everywhere. */
+val core_fpscr_implemented : unit -> word
+
 /* Data address breakpoint: does this data access trip the core's debug
  * compare, so that a data access exception with DSISR[9] is taken instead?
  * Arguments are the effective address, the access width in bytes, and true

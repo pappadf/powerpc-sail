@@ -140,10 +140,17 @@ Divergences specific to the post-601 cores:
 - **`MSR[TGPR]` does not remap GPR0-GPR3** on the 603.  The bit is settable
   and reads back, but the only thing that sets it in hardware is a TLB miss
   exception, which cannot occur here.
-- **Per-core alignment rules are not modelled.**  The 603 faults on a
-  misaligned single-register access in little-endian mode and on every
-  multiple or string instruction there (MPC603EUM Table 4-2); the 601's
-  narrower rules in `alignment_fault` are applied on every core.
+- **`FPSCR[NI]` is state, not a mode.**  The post-601 cores implement the
+  non-IEEE mode enable bit (MPCFPE32B Table 2-4) as a readable, writable
+  sticky bit, but the mode itself — flushing denormalized results — is not
+  modelled: arithmetic behaves identically with NI set.
+- **The 604's string-boundary alignment faults are taken with translation
+  off as well as on.**  The manuals' sentence ("a non-word-aligned string
+  operation that crosses a 4-Kbyte boundary ... always causes an alignment
+  exception", MPC604UM/MPC604EUM/MPC750UM load/store string sections) is
+  unconditional, and that is how `ppc32_alignment_fault` reads it; if the
+  hardware only checks under page translation, word-aligned 256 MB cases
+  with `MSR[DR]=0` over-fault here.
 - **`eciwx`/`ecowx` decode on the 603**, where the PID6-603e treats them as
   illegal (MPC603EUM §4.5.7) and only the PID7t-603e implements them.
 - **HID0, HID1, L2CR and the BAT/SPR reserved fields are unmasked** on the

@@ -54,15 +54,27 @@ function clause execute(EIEIO()) = COMPLETED
  * reservation itself is a single flag in ppc_mem.sail — see there for why
  * the reserved address is not modelled.
  *
- * Both are ordinary loads and stores as far as translation, protection and
- * alignment go, with two exceptions.  They may not be used in a
+ * Both are ordinary loads and stores as far as translation and protection
+ * go, with two exceptions.  On the 601 they may not be used in a
  * non-memory-forced I/O controller interface segment (§6.10.5), and the EA
- * "must be a multiple of 4" — but the manual is careful about what that
- * means: a misaligned EA raises the alignment exception only "if the load
- * crosses a page boundary", and is otherwise boundedly undefined.  That is
- * exactly what the ordinary mem_read/mem_write checks already do, so no
- * extra check is needed; INVALID-FORM: a misaligned access that crosses
- * nothing is performed as written. */
+ * "must be a multiple of 4" — what a violation does is per-core
+ * (Align_atomic): the 601 faults it only when the operand crosses a
+ * boundary its §5.4.6.1 rules cover and otherwise performs it as written
+ * (INVALID-FORM, boundedly undefined), while the later cores fault any
+ * misaligned EA outright (§4.5.6).
+ *
+ * THE ALIGNMENT RANGE CHECK COMES FIRST, before the reservation is even
+ * consulted: §5.4.6.1 — "the appropriate range check is performed before
+ * the instruction begins execution", so that a fault "is guaranteed that no
+ * portion of the instruction has been executed".  §5.4.3's rule that an
+ * stwcx. whose reservation is clear "cannot generate an exception,
+ * regardless of whether the address translation would have failed, page
+ * protection would have been violated, or the address matches one in the
+ * DABR" is scoped, by its own lead-in, to the DATA ACCESS exception — its
+ * three reasons are all §5.4.3 causes — and does not reach the
+ * higher-priority alignment exception.  (Reported by an external 601 core:
+ * a reservation-less stwcx. at 0xFFFFFFFE must take the 256 MB-crossing
+ * alignment fault, not complete with CR0 = SO.) */
 
 union clause ast = LWARX : (ridx, ridx, ridx)
 
@@ -72,8 +84,12 @@ mapping clause encdec =
 
 function clause execute(LWARX(rD, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if nonforced_io_segment(ea) then data_access_fault(Fault_IOSegUnsupported, ea, false)
-  else match mem_read(ea, 4) {
+  /* Alignment ahead of the I/O-segment data access exception: §2.4.3.2
+   * puts alignment exceptions ahead of data access exceptions, and the
+   * range check precedes execution (§5.4.6.1). */
+  if align_check(ea, 4, Align_atomic) then EXCEPTION_TAKEN
+  else if nonforced_io_segment(ea) then data_access_fault(Fault_IOSegUnsupported, ea, false)
+  else match mem_read_raw(ea, 4) {
     Some(v) => {
       GPR(rD) = v;
       set_reservation();
@@ -91,17 +107,17 @@ mapping clause encdec =
 
 function clause execute(STWCX(rS, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if not_bool(reservation_valid) then {
-    /* §5.4.3 is emphatic that this path cannot fault: with the reservation
-     * already gone the instruction "cannot generate an exception, regardless
-     * of whether the address translation would have failed, page protection
-     * would have been violated, or the address matches one in the DABR".
-     * So the EA is never translated at all — only CR0 is written. */
+  if align_check(ea, 4, Align_atomic) then EXCEPTION_TAKEN
+  else if not_bool(reservation_valid) then {
+    /* The range check above is the ONE thing that precedes this: with the
+     * reservation already gone the instruction takes no data access
+     * exception of any kind (§5.4.3, quoted in the header) — the EA is
+     * never translated at all and only CR0 is written. */
     CRfield(0, 0b00 @ 0b0 @ XER[SO]);
     COMPLETED
   } else if nonforced_io_segment(ea) then
     data_access_fault(Fault_IOSegUnsupported, ea, true)
-  else if mem_write(ea, 4, GPR(rS)) then {
+  else if mem_write_raw(ea, 4, GPR(rS)) then {
     /* CR0 <- 0b00 || store_performed || XER[SO] */
     clear_reservation();
     CRfield(0, 0b00 @ 0b1 @ XER[SO]);

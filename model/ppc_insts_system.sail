@@ -274,8 +274,11 @@ function clause execute(TLBIE(_rB)) =
  *  - otherwise the word goes to or comes from a device, and no device is
  *    modelled — a scaffold hole that throws rather than inventing data.
  *
- * An unaligned EA is boundedly undefined rather than an alignment
- * exception, so there is no alignment check.  601: both are accepted with
+ * The EA is range-checked first (Align_atomic, §5.4.6.1's "before the
+ * instruction begins execution"): on the 601 an unaligned EA is boundedly
+ * undefined rather than a fault — only its boundary-crossing rules can
+ * fire — while the later cores fault any eciwx/ecowx that is not
+ * word-aligned (§4.5.6 in each manual).  601: both are accepted with
  * MSR[DT]=0 as well as 1, where the architecture requires 1 — nothing to
  * do about that here, since translation is not consulted on either of the
  * two paths the model can complete. */
@@ -317,7 +320,8 @@ mapping clause encdec =
 
 function clause execute(ECIWX(_rD, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if EAR[E] == 0b0 then external_control_fault(ea, false)
+  if align_check(ea, 4, Align_ext) then EXCEPTION_TAKEN
+  else if EAR[E] == 0b0 then external_control_fault(ea, false)
   else if ea_in_io_segment(ea) then COMPLETED
   else throw(Model_unimplemented("eciwx: no external control device"))
 }
@@ -330,7 +334,8 @@ mapping clause encdec =
 
 function clause execute(ECOWX(_rS, rA, rB)) = {
   let ea = ea_x(rA, rB);
-  if EAR[E] == 0b0 then external_control_fault(ea, true)
+  if align_check(ea, 4, Align_ext) then EXCEPTION_TAKEN
+  else if EAR[E] == 0b0 then external_control_fault(ea, true)
   else if ea_in_io_segment(ea) then COMPLETED
   else throw(Model_unimplemented("ecowx: no external control device"))
 }

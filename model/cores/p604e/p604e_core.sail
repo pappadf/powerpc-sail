@@ -97,4 +97,12 @@ function core_inst_breakpoint(cia) =
 function core_data_breakpoint(ea, width, is_store) =
   ppc32_data_breakpoint(ea, width, is_store)
 
+
+/* Alignment and DAR: identical to the 604's (MPC604EUM §4.5.6 and its
+ * string sentence match the MPC604UM's word for word). */
+function core_alignment_fault(ea, n, rule) =
+  ppc32_alignment_fault(false, true, true, ea, n, rule)
+
+function core_alignment_dar(ea, _rule) = ea
+
 $endif

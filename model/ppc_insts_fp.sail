@@ -41,16 +41,23 @@ $define _PPC_INSTS_FP
 
 /* --- FPSCR maintenance (§2.2.3) ----------------------------------------- */
 
-/* Bits the 601's FPSCR does not implement: manual bit 20, VXSOFT (21),
- * VXSQRT (22) and bit 29, all of which read as zero (Table 2-1). */
-let fpscr_implemented : word = 0xFFFFF1FB
+/* Which FPSCR bits exist is a per-core question — the 601 lacks VXSOFT
+ * (manual bit 21), VXSQRT (22) and bit 29, where the later cores implement
+ * all three (MPCFPE32B Table 2-4; bit 29 is NI) — so the mask lives behind
+ * the core_fpscr_implemented hook.  Every write is filtered through it, so
+ * an unimplemented bit is permanently zero. */
+val fpscr_implemented : unit -> word
+function fpscr_implemented() = core_fpscr_implemented()
 
 /* The sticky exception bits, whose 0 -> 1 transition sets FX: manual bits
- * 3-12 (OX..VXVC) and 21-23, of which the 601 has only VXCVI (23). */
-let fpscr_exception_bits : word = 0x1FF80100
+ * 3-12 (OX..VXVC) and 21-23.  These are the ARCHITECTURAL masks; a core
+ * that lacks some of the bits (the 601 has only VXCVI of 21-23) can never
+ * set them, because writes are masked first, so no per-core narrowing is
+ * needed here. */
+let fpscr_exception_bits : word = 0x1FF80700
 
 /* The invalid-operation bits that VX summarizes: manual bits 7-12, 21-23. */
-let fpscr_invalid_bits : word = 0x01F80100
+let fpscr_invalid_bits : word = 0x01F80700
 
 /* FEX and VX are not stored but derived — "the logical ORs of other FPSCR
  * bits" (§2.2.3) — so every write recomputes them rather than keeping them. */
@@ -75,7 +82,7 @@ function fpscr_update_summary() = {
  * bit leaves FX alone. */
 val fpscr_raise : word -> unit
 function fpscr_raise(m) = {
-  let raised = m & fpscr_implemented;
+  let raised = m & fpscr_implemented();
   let newly = raised & not_vec(FPSCR.bits) & fpscr_exception_bits;
   harness_wrote(hw_fpscr);
   FPSCR = Mk_Fpscr(FPSCR.bits | raised);
@@ -91,7 +98,7 @@ function fpscr_raise(m) = {
 val fpscr_write : word -> unit
 function fpscr_write(v) = {
   harness_wrote(hw_fpscr);
-  FPSCR = Mk_Fpscr(v & fpscr_implemented);
+  FPSCR = Mk_Fpscr(v & fpscr_implemented());
   fpscr_update_summary()
 }
 
@@ -739,7 +746,26 @@ function clause execute(FMADD(frD, frA, frC, frB, subtract, negate, single, rc))
  * purpose — an SNaN operand is invalid, the result can overflow, underflow
  * or be inexact — so it is the identity operation delivered in the single
  * format, and fp_deliver's single-precision path does the rest, including
- * §5.4.7.4.1's 192 rather than 1536 for an enabled overflow. */
+ * §5.4.7.4.1's 192 rather than 1536 for an enabled overflow.
+ *
+ * NaN OPERANDS DO NOT PROPAGATE INTACT.  frsp is the one operation the
+ * architecture exempts from QNaN payload propagation ("QNaNs propagate
+ * through all operations, except floating-point round to single-precision,
+ * ordered comparison, and conversion to integer" — MPCFPE32B §3.3.2), and
+ * its round-to-single model spells out both NaN cases (MPCFPE32B §D.4.1):
+ *
+ *   QNaN Operand:  frD <- frB[0-34] || 29 zeros
+ *   SNaN Operand:  VXSNAN <- 1; if VE = 0 then frD <- frB[0-11] || 1 ||
+ *                  frB[13-34] || 29 zeros
+ *
+ * i.e. quieten as usual, then clear the low 29 fraction bits — the value
+ * delivered is the operand's single-precision image, consistent with "the
+ * low-order 29 fraction bits are zero" for every frsp result (§2.5.5) and
+ * with what lfs does to a NaN it converts (§3.5.9.1).  fp_deliver's
+ * Ev_Invalid path writes the NaN verbatim, so the truncation happens here.
+ * (Reported by an external 601 core against a generated vector: the model
+ * shipped frsp of 0x7FF800000002BBBB unchanged where hardware conforming to
+ * §D.4.1 delivers 0x7FF8000000000000.) */
 union clause ast = FRSP : (fridx, fridx, bits(1))
 
 mapping clause encdec =
@@ -750,7 +776,10 @@ function clause execute(FRSP(frD, frB, rc)) =
   if fp_unavailable() then fp_unavailable_exception()
   else {
     let b = FPR(frB);
-    let ev = if fp_is_nan(b) then fp_nan_result(fp_absent_operand, b, fp_absent_operand)
+    let ev = if fp_is_nan(b) then
+               Ev_Invalid(if fp_any_snan(fp_absent_operand, b, fp_absent_operand)
+                          then fpscr_bit_vxsnan else zeros(32),
+                          fp_quieten(b) & 0xFFFFFFFFE0000000)
              else if fp_is_inf(b) then Ev_Inf(fp_sign(b))
              else if fp_is_zero(b) then Ev_Zero(fp_sign(b))
              else {

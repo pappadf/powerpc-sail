@@ -16,13 +16,14 @@
  *   lswi lswx stswi stswx                      (Table 3-20, move string)
  *   (lscbx is 601-only -> cores/p601/p601_insts_power.sail.)
  *
- * Alignment checking (§5.4.6.1, §5.4.6.3) lives in alignment_fault below and
- * is applied by mem_read/mem_write; string and multiple instructions check
- * their whole transfer up front instead and then use mem_*_raw.  The
- * I/O-controller-segment rule for floating-point operands (§5.4.6.1.2) is
- * what Align_fp adds below; the floating-point loads and stores that go
- * through it live in ppc_insts_fp.sail (Tables 3-22/3-23 — stfiwx is NOT
- * implemented on the 601).
+ * Alignment checking is PER-CORE — the 601's rules (§5.4.6.1, §5.4.6.3) and
+ * the later cores' (§4.5.6 in each manual) genuinely differ — and lives
+ * behind the core_alignment_fault hook; align_check below is the common
+ * check-and-raise plumbing, applied by mem_read/mem_write.  String and
+ * multiple instructions check their whole transfer up front instead and then
+ * use mem_*_raw.  The floating-point loads and stores that carry Align_fp
+ * live in ppc_insts_fp.sail (Tables 3-22/3-23 — stfiwx is NOT implemented
+ * on the 601).
  */
 
 $ifndef _PPC_INSTS_LOADSTORE
@@ -39,61 +40,28 @@ function crosses_256m(ea, n) = unsigned(ea[27 .. 0]) + n > 268435456
 val crosses_4k : (word, int) -> bool
 function crosses_4k(ea, n) = unsigned(ea[11 .. 0]) + n > 4096
 
-/* Must this access raise an alignment exception (§5.4.6.1)?
+/* The check-and-raise every access path shares: consult the core's rules
+ * and, on a fault, take the alignment exception with the DAR value the core
+ * specifies (the 603e stores EA + 4 for a misaligned multiple or atomic
+ * operand — see core_alignment_dar in ppc_core_iface.sail).  Returns true
+ * when the exception was taken.
  *
- *  - Crossing a 256 MB boundary always faults, in every translation mode
- *    and whatever the alignment — including with translation off.
- *  - Under page-address translation (MSR[DT]=1 over a memory segment) a
- *    4 KB crossing faults as well; for a string or multiple only when the
- *    operand is not word-aligned (§3.5.6).  The manual is explicit that
- *    falling inside a BAT region does not exempt the access, so no BAT
- *    lookup is needed here.  Align_string_4k is the one string instruction
- *    whose 4 KB crossing faults "regardless of the starting address, even if
- *    the operand starts on a word boundary" (§5.4.6.1.4).
- *
- *  - In LITTLE-ENDIAN mode the rules are far stricter (§5.4.6.3, §2.4.3.2):
- *    ANY misaligned operand faults, and EVERY string or multiple instruction
- *    faults whatever its address.  Both follow from the addressing being a
- *    munge of the low three address bits, which only lands where a
- *    little-endian program expects for a naturally aligned operand.
- *
- * In big-endian mode the 601 handles every other misalignment in hardware by
- * splitting the access, so nothing else faults.
- *
- *  - An I/O controller interface segment that is not memory-forced makes
- *    every FLOATING-POINT load and store fault whatever its alignment
- *    (§5.4.6.1.2), which is what Align_fp adds to Align_operand. */
-val alignment_fault : (word, int, AlignRule) -> bool
-function alignment_fault(ea, n, rule) = {
-  let page_mode = (MSR[DT] == 0b1) & (rSR(ea[31 .. 28])[T] == 0b0);
-  let four_k : bool = match rule {
-    Align_string => (ea[1 .. 0] != 0b00) & crosses_4k(ea, n),
-    _            => crosses_4k(ea, n)
-  };
-  let misaligned : bool = match rule {
-    Align_operand => (n > 1) & (tmod_int(unsigned(ea), n) != 0),
-    Align_fp      => (n > 1) & (tmod_int(unsigned(ea), n) != 0),
-    _             => true      /* a string always faults in LE mode */
-  };
-  let le_fault = not_bool(core_bigendian()) & misaligned;
-  /* §5.4.6.1.2: "floating-point loads and stores to I/O controller interface
-   * segments always cause an alignment exception, regardless of operand
-   * alignment" — the memory-forced ones excepted, being ordinary memory. */
-  let io_fault : bool = match rule {
-    Align_fp => nonforced_io_segment(ea),
-    _        => false
-  };
-  crosses_256m(ea, n) | (page_mode & four_k) | le_fault | io_fault
-}
+ * WHAT faults is a per-core decision: see cores/p601/p601_core.sail for the
+ * 601's §5.4.6.1 rules and cores/common/ppc32_core.sail for the later
+ * cores' §4.5.6 rules. */
+val align_check : (word, int, AlignRule) -> bool
+function align_check(ea, n, rule) =
+  if core_alignment_fault(ea, n, rule) then {
+    let _ = alignment_exception(core_alignment_dar(ea, rule));
+    true
+  } else false
 
-/* Up-front range check for a string or multiple.  The 601 performs it
+/* Up-front range check for a string or multiple.  The check is performed
  * before the instruction begins, so a fault leaves no partial transfer
  * (§5.4.6.1); the per-word/per-byte accesses that follow therefore go
  * through the unchecked mem_*_raw path. */
 val string_align_ok : (word, int, AlignRule) -> bool
-function string_align_ok(ea, n, rule) =
-  if alignment_fault(ea, n, rule) then { let _ = alignment_exception(ea); false }
-  else true
+function string_align_ok(ea, n, rule) = not_bool(align_check(ea, n, rule))
 
 /* Data address breakpoint (§2.3.3.13.4).  Checked per individual
  * access — which for a string or multiple means once per word, as Table 2-26
@@ -158,33 +126,26 @@ function mem_write_raw(ea, width, data) =
  * store goes through. */
 val mem_read : forall 'n, 'n in {1, 2, 4, 8}. (word, int('n)) -> option(bits(8 * 'n))
 function mem_read(ea, width) =
-  if alignment_fault(ea, width, Align_operand) then {
-    let _ = alignment_exception(ea);
-    None()
-  } else mem_read_raw(ea, width)
+  if align_check(ea, width, Align_operand) then None()
+  else mem_read_raw(ea, width)
 
 val mem_write : forall 'n, 'n in {1, 2, 4, 8}. (word, int('n), bits(8 * 'n)) -> bool
 function mem_write(ea, width, data) =
-  if alignment_fault(ea, width, Align_operand) then {
-    let _ = alignment_exception(ea);
-    false
-  } else mem_write_raw(ea, width, data)
+  if align_check(ea, width, Align_operand) then false
+  else mem_write_raw(ea, width, data)
 
-/* The floating-point accessors (§5.4.6.1.2).  Identical to mem_read and
- * mem_write but for the alignment rule, which has one more way to fault. */
+/* The floating-point accessors.  Identical to mem_read and mem_write but for
+ * the alignment rule, which has more ways to fault — word-alignment on the
+ * later cores, the I/O-segment rule on the 601 (§5.4.6.1.2). */
 val mem_read_fp : forall 'n, 'n in {4, 8}. (word, int('n)) -> option(bits(8 * 'n))
 function mem_read_fp(ea, width) =
-  if alignment_fault(ea, width, Align_fp) then {
-    let _ = alignment_exception(ea);
-    None()
-  } else mem_read_raw(ea, width)
+  if align_check(ea, width, Align_fp) then None()
+  else mem_read_raw(ea, width)
 
 val mem_write_fp : forall 'n, 'n in {4, 8}. (word, int('n), bits(8 * 'n)) -> bool
 function mem_write_fp(ea, width, data) =
-  if alignment_fault(ea, width, Align_fp) then {
-    let _ = alignment_exception(ea);
-    false
-  } else mem_write_raw(ea, width, data)
+  if align_check(ea, width, Align_fp) then false
+  else mem_write_raw(ea, width, data)
 
 /* --- Addressing modes --------------------------------------------------- */
 
@@ -588,7 +549,7 @@ mapping clause encdec =
 function clause execute(LMW(rD, rA, d)) = {
   let base = ea_d(rA, d);
   let first = unsigned(rD);
-  var ok : bool = string_align_ok(base, 4 * (32 - first), Align_string);
+  var ok : bool = string_align_ok(base, 4 * (32 - first), Align_multiple);
   foreach (r from 0 to 31) {
     if ok & (r >= first) then {
       match mem_read_raw(base + to_word(4 * (r - first)), 4) {
@@ -616,7 +577,7 @@ mapping clause encdec =
 function clause execute(STMW(rS, rA, d)) = {
   let base = ea_d(rA, d);
   let first = unsigned(rS);
-  var ok : bool = string_align_ok(base, 4 * (32 - first), Align_string);
+  var ok : bool = string_align_ok(base, 4 * (32 - first), Align_multiple);
   foreach (r from 0 to 31) {
     if ok & (r >= first) then {
       if not_bool(mem_write_raw(base + to_word(4 * (r - first)), 4, GPRs[r]))

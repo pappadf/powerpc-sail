@@ -2,18 +2,29 @@
 # Blank lines and #-comments are ignored.  See the note above TEST_SRCS_ALL in
 # the Makefile for how this is used, and test/p604e/ for the expected outputs.
 #
-# EVERY program listed here was checked against the 601's expected file and
-# differs from it ONLY in bit 19 of the MSR images it captures — MSR[ME],
-# which the 601 sets at reset (MPC601UM Table 2-11) and this core leaves
-# clear.  So these are not fresh snapshots of current behaviour: they are the
-# 601's hand-derived expectations, re-derived through one documented
-# difference.  The programs' own headers derive their values from the manual
-# and remain the reason to believe them.
+# With four exceptions, every program listed here was checked against the
+# 601's expected file and differs from it ONLY in bit 19 of the MSR images it
+# captures — MSR[ME], which the 601 sets at reset (MPC601UM Table 2-11) and
+# this core leaves clear.  So those are not fresh snapshots of current
+# behaviour: they are the 601's hand-derived expectations, re-derived through
+# one documented difference.  The programs' own headers derive their values
+# from the manual and remain the reason to believe them.
+#
+# The four exceptions — alignppc32, alignres, frspnan and fpscrsoft — have
+# per-core expected files derived in their own headers: alignment and the
+# VXSOFT/VXSQRT/NI bits genuinely differ between the 601 and this core, and
+# frspnan pins a §D.4.1 case no older program covered.
 #
 # EXCLUDED, and why.  Each of these needs a test written for this core rather
 # than a rerun of the 601's, and none is excluded because it fails for an
 # unexplained reason:
 #
+#   align,        both encode the 601's boundary rules — the blanket 256 MB
+#   alignmulti    crossing fault (§5.4.6.1.1) and the misaligned-multiple
+#                 POWER compatibility that goes with it — which this core
+#                 does not have (§4.5.6: no boundary rule for elementary
+#                 accesses, and a misaligned lmw/stmw faults outright).
+#                 alignppc32 and alignres cover this core's rules instead.
 #   bat, dcbz     both set up a 601 BAT — one unified array, keyed Ks/Ku, with
 #                 the valid bit in the lower register and block sizes to 8 MB.
 #                 This core has SPLIT IBAT/DBAT arrays keyed Vs/Vp with the
@@ -39,8 +50,8 @@
 #                 have, so the program dies rather than producing a state to
 #                 compare (cores/p604/p604_core.sail).
 
-align
-alignmulti
+alignppc32
+alignres
 arith
 branch
 branchreg
@@ -58,7 +69,9 @@ fpmadd
 fpmem
 fpmemx
 fpscr
+fpscrsoft
 fpsingle
+frspnan
 illegal
 load
 logical

@@ -133,4 +133,17 @@ function core_inst_breakpoint(cia) =
 function core_data_breakpoint(ea, width, is_store) =
   ppc32_data_breakpoint(ea, width, is_store)
 
+
+/* Alignment (§4.5.6): as the 604 but WITHOUT the floating-point
+ * direct-store alignment fault — "in the MPC750, a floating-point load or
+ * store to a direct-store segment causes a DSI exception rather than an
+ * alignment exception, as specified by the PowerPC architecture" (§4.5.6),
+ * and core_direct_store above already produces that DSI.  The string
+ * boundary sentence appears in this manual too (ch. 2, load/store string
+ * section). */
+function core_alignment_fault(ea, n, rule) =
+  ppc32_alignment_fault(false, true, false, ea, n, rule)
+
+function core_alignment_dar(ea, _rule) = ea
+
 $endif

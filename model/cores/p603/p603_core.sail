@@ -146,4 +146,22 @@ function core_inst_breakpoint(cia) =
  * never fires and the SPR is not in p603_sprs.sail. */
 function core_data_breakpoint(_ea, _width, _is_store) = false
 
+/* Alignment (§4.5.6): the shared §4.5.6 rules, with this core's three
+ * particulars — Table 4-15's 4 KB page-translation crossing rule (the only
+ * boundary rule any of the later cores keeps), NO big-endian string
+ * boundary rule (the 604/750 string sentence does not appear in this
+ * manual), and the floating-point direct-store fault (§4.5.6 bullet). */
+function core_alignment_fault(ea, n, rule) =
+  ppc32_alignment_fault(true, false, true, ea, n, rule)
+
+/* "When the operand of an lmw, stmw, lwarx, or stwcx. instruction is not
+ * word-aligned, that address value +4 is stored into the DAR" (Table 4-14
+ * and §4.5.6.2) — a documented quirk of this core alone. */
+function core_alignment_dar(ea, rule) =
+  match rule {
+    Align_multiple => if ea[1 .. 0] != 0b00 then ea + 4 else ea,
+    Align_atomic   => if ea[1 .. 0] != 0b00 then ea + 4 else ea,
+    _              => ea
+  }
+
 $endif

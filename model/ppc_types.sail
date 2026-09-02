@@ -30,22 +30,32 @@ enum MemoryAccess = {
   Mem_store
 }
 
-/* Which set of §5.4.6.1 boundary rules an access obeys.  The 256 MB rule is
- * common to all three; they differ over the 4 KB one, and over what
- * little-endian mode makes of them (§5.4.6.3).  See alignment_fault. */
+/* Which class of alignment rules an access obeys.  WHAT faults for each
+ * class is a per-core question — the 601's rules (MPC601UM §5.4.6.1) and
+ * the later cores' (MPC603EUM/MPC604UM/MPC750UM §4.5.6) genuinely differ —
+ * so the classes here only name the kind of access, and the decision lives
+ * behind the core_alignment_fault hook (ppc_core_iface.sail).  See
+ * align_check in ppc_insts_loadstore.sail for the common plumbing. */
 enum AlignRule = {
-  Align_operand,      /* an ordinary load or store: a 4 KB crossing faults,
-                         and in little-endian mode so does any misalignment  */
-  Align_string,       /* a string or multiple: a 4 KB crossing faults only if
-                         the operand is not word-aligned, and little-endian
-                         mode faults outright                                */
+  Align_operand,      /* an ordinary elementary integer load or store        */
+  Align_multiple,     /* lmw/stmw.  The 601 treats these exactly as strings
+                         (POWER compatibility, §3.5.5); the later cores fault
+                         any that is not word-aligned (§4.5.6)               */
+  Align_string,       /* lswi/lswx/stswi/stswx                               */
   Align_string_4k,    /* a string whose 4 KB crossing faults whatever its
                          alignment (§5.4.6.1.4).  The only instruction with
                          this rule is a POWER holdover the 601 implements    */
-  Align_fp            /* a floating-point operand: as Align_operand, plus
-                         §5.4.6.1.2's rule that any floating-point access to
-                         an I/O controller interface segment that is not
-                         memory-forced faults whatever its alignment         */
+  Align_atomic,       /* lwarx/stwcx.: "the EA must be a multiple of 4".
+                         On the 601 a violation is boundedly undefined and
+                         the access obeys the operand rules; every later
+                         core faults it outright (§4.5.6)                    */
+  Align_ext,          /* eciwx/ecowx: the same word-alignment requirement as
+                         Align_atomic — a separate class only because the
+                         603e's DAR quirk names lmw/stmw/lwarx/stwcx. and
+                         not these (MPC603EUM §4.5.6.2)                      */
+  Align_fp            /* a floating-point operand: word-alignment and
+                         direct-store/I-O-segment rules apply on top of the
+                         operand rules, per core                             */
 }
 
 /* Exceptions (interrupts, in later PowerPC terminology).  This is the union

@@ -316,10 +316,12 @@ static void build_elem_table(void)
   add_field("xer.cmpb", &zXER.zbits, 15,  8);
   add_field("xer.bc",   &zXER.zbits,  6,  0);
 
-  /* FPSCR, Table 2-1.  fpcc is deliberately absent: it is fprf[3:0], and
-   * naming an element that overlaps another would make the write-set
-   * ambiguous.  Bits 9, 10 (VXSOFT/VXSQRT) and 2 are unimplemented on the
-   * 601 and have no names. */
+  /* FPSCR, Table 2-1 / MPCFPE32B Table 2-4.  fpcc is deliberately absent:
+   * it is fprf[3:0], and naming an element that overlaps another would make
+   * the write-set ambiguous.  Bits 10, 9 (VXSOFT/VXSQRT) and 2 (NI) are
+   * unimplemented on the 601 and have no names there; every later core
+   * implements all three (core_fpscr_implemented in the model), so they are
+   * elements on those builds — in bit order, like the rest. */
   add_field("fpscr.fx",     &zFPSCR.zbits, 31, 31);
   add_field("fpscr.fex",    &zFPSCR.zbits, 30, 30);
   add_field("fpscr.vx",     &zFPSCR.zbits, 29, 29);
@@ -336,12 +338,19 @@ static void build_elem_table(void)
   add_field("fpscr.fr",     &zFPSCR.zbits, 18, 18);
   add_field("fpscr.fi",     &zFPSCR.zbits, 17, 17);
   add_field("fpscr.fprf",   &zFPSCR.zbits, 16, 12);
+#ifndef PPC_CORE_P601
+  add_field("fpscr.vxsoft", &zFPSCR.zbits, 10, 10);
+  add_field("fpscr.vxsqrt", &zFPSCR.zbits,  9,  9);
+#endif
   add_field("fpscr.vxcvi",  &zFPSCR.zbits,  8,  8);
   add_field("fpscr.ve",     &zFPSCR.zbits,  7,  7);
   add_field("fpscr.oe",     &zFPSCR.zbits,  6,  6);
   add_field("fpscr.ue",     &zFPSCR.zbits,  5,  5);
   add_field("fpscr.ze",     &zFPSCR.zbits,  4,  4);
   add_field("fpscr.xe",     &zFPSCR.zbits,  3,  3);
+#ifndef PPC_CORE_P601
+  add_field("fpscr.ni",     &zFPSCR.zbits,  2,  2);
+#endif
   add_field("fpscr.rn",     &zFPSCR.zbits,  1,  0);
 
   idx_cia = n_elems; add_reg("cia", &zCIA);
@@ -597,7 +606,7 @@ static void build_write_map(void)
 
   map_hw(HW_CR,    "cr0");        /* 8 fields  */
   map_hw(HW_XER,   "xer.so");     /* 5 fields  */
-  map_hw(HW_FPSCR, "fpscr.fx");   /* 23 fields */
+  map_hw(HW_FPSCR, "fpscr.fx");   /* 23 fields; 26 on the post-601 cores */
 
   map_hw(HW_CIA,   "cia");
   map_hw(HW_NIA,   "nia");

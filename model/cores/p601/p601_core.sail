@@ -164,4 +164,72 @@ function core_exception_vector(e) =
  * completes one instruction at a time. */
 function core_bigendian() = HID0[LM] == 0b0
 
+/* --- Alignment exceptions (§5.4.6.1) ------------------------------------ */
+
+/* The 601's rules — the widest of the family's, because it is the one core
+ * that faults on boundary crossings with translation OFF:
+ *
+ *  - Crossing a 256 MB boundary always faults, in every translation mode
+ *    and whatever the alignment — including with translation off
+ *    (§5.4.6.1.1, and Table 5-14's "the appropriate range check is
+ *    performed before the instruction begins execution").
+ *  - Under page-address translation (MSR[DT]=1 over a memory segment) a
+ *    4 KB crossing faults as well; for a string or multiple only when the
+ *    operand is not word-aligned (§3.5.6).  The manual is explicit that
+ *    falling inside a BAT region does not exempt the access, so no BAT
+ *    lookup is needed here.  Align_string_4k is the one string instruction
+ *    (lscbx) whose 4 KB crossing faults "regardless of the starting
+ *    address, even if the operand starts on a word boundary" (§5.4.6.1.4).
+ *  - In LITTLE-ENDIAN mode the rules are far stricter (§5.4.6.3, §2.4.3.2):
+ *    ANY misaligned operand faults, and EVERY string or multiple
+ *    instruction faults whatever its address.  Both follow from the
+ *    addressing being a munge of the low three address bits, which only
+ *    lands where a little-endian program expects for a naturally aligned
+ *    operand.
+ *  - An I/O controller interface segment that is not memory-forced makes
+ *    every FLOATING-POINT load and store fault whatever its alignment
+ *    (§5.4.6.1.2).
+ *
+ * In big-endian mode the 601 handles every other misalignment in hardware
+ * by splitting the access, so nothing else faults.  In particular a
+ * misaligned lmw/stmw is EXECUTED (POWER compatibility, §3.5.5) and a
+ * misaligned lwarx/stwcx./eciwx/ecowx that crosses nothing is boundedly
+ * undefined and performed as written — Align_multiple and Align_atomic
+ * carry no extra rule here, unlike on the later cores. */
+function core_alignment_fault(ea, n, rule) = {
+  let page_mode = (MSR[DT] == 0b1) & (rSR(ea[31 .. 28])[T] == 0b0);
+  let four_k : bool = match rule {
+    Align_string   => (ea[1 .. 0] != 0b00) & crosses_4k(ea, n),
+    Align_multiple => (ea[1 .. 0] != 0b00) & crosses_4k(ea, n),
+    _              => crosses_4k(ea, n)
+  };
+  let misaligned : bool = match rule {
+    Align_operand => (n > 1) & (tmod_int(unsigned(ea), n) != 0),
+    Align_fp      => (n > 1) & (tmod_int(unsigned(ea), n) != 0),
+    Align_atomic  => ea[1 .. 0] != 0b00,
+    Align_ext     => ea[1 .. 0] != 0b00,
+    _             => true      /* a string or multiple always faults in LE */
+  };
+  let le_fault = not_bool(core_bigendian()) & misaligned;
+  /* §5.4.6.1.2: "floating-point loads and stores to I/O controller
+   * interface segments always cause an alignment exception, regardless of
+   * operand alignment" — the memory-forced ones excepted, being ordinary
+   * memory. */
+  let io_fault : bool = match rule {
+    Align_fp => nonforced_io_segment(ea),
+    _        => false
+  };
+  crosses_256m(ea, n) | (page_mode & four_k) | le_fault | io_fault
+}
+
+/* DAR gets the computed EA (Table 5-13); the +4 quirk is the 603e's. */
+function core_alignment_dar(ea, _rule) = ea
+
+/* --- FPSCR (Table 2-1) --------------------------------------------------- */
+
+/* Manual bit 20 (architecturally reserved), VXSOFT (21), VXSQRT (22) and
+ * bit 29 are "not implemented in the 601" and read as zero.  In sail bit
+ * positions that clears bits 11, 10, 9 and 2. */
+function core_fpscr_implemented() = 0xFFFFF1FB
+
 $endif
